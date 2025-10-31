@@ -43,8 +43,8 @@ const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
 const level = LOG_LEVELS[CONFIG.logLevel] ?? LOG_LEVELS.info;
 const logger = {
   debug: (...a) => level <= 0 && console.error('[DEBUG]', ...a),
-  info:  (...a) => level <= 1 && console.log('[INFO]', ...a),
-  warn:  (...a) => level <= 2 && console.warn('[WARN]', ...a),
+  info: (...a) => level <= 1 && console.log('[INFO]', ...a),
+  warn: (...a) => level <= 2 && console.warn('[WARN]', ...a),
   error: (...a) => level <= 3 && console.error('[ERROR]', ...a),
 };
 
@@ -113,7 +113,7 @@ function promptHidden(query) {
 }
 
 // --- Ensure API key with CLI/env/.env/prompt fallback ---
-async function ensureApiKey({ envName, cliValue, promptLabel, cwd, saveToEnv=false }) {
+async function ensureApiKey({ envName, cliValue, promptLabel, cwd, saveToEnv = false }) {
   let key = (cliValue || process.env[envName] || '').trim();
   if (!key) {
     loadDotEnvToProcess(cwd);
@@ -121,7 +121,7 @@ async function ensureApiKey({ envName, cliValue, promptLabel, cwd, saveToEnv=fal
   }
   if (!key) {
     if (!(process.stdin.isTTY && process.stdout.isTTY)) {
-      throw new AppError(`${envName} not set and no TTY to prompt. Set ${envName} or pass a --${envName.toLowerCase().replace(/_api_/,'-')} flag.`, 'CONFIG');
+      throw new AppError(`${envName} not set and no TTY to prompt. Set ${envName} or pass a --${envName.toLowerCase().replace(/_api_/, '-')} flag.`, 'CONFIG');
     }
     key = await promptHidden(`${promptLabel} (input hidden): `);
     if (!key) throw new AppError(`${envName} is required`, 'CONFIG');
@@ -160,7 +160,7 @@ function truncate(text, maxChars = CONFIG.maxToolOutputChars) {
 // Handles common LLM mistakes like trailing commas, single quotes, unquoted keys
 function tryParseJSON(s) {
   // First try strict parsing
-  try { return JSON.parse(s); } catch {}
+  try { return JSON.parse(s); } catch { }
 
   // Light fixups for common LLM mistakes
   const relaxed = s
@@ -185,7 +185,6 @@ const TOOL_DOCS = {
   write_file: 'Write text file. args: {path, content}',
   fetch_url: 'HTTP(S) fetch. args: {url, method?, headers?, body?, as?=text|json, max_bytes?}',
   define_tool: 'Define a new tool at runtime. args: {name, code}',
-  // If you added these tools earlier, keep their docs here:
   search_web: 'DuckDuckGo HTML search. args: {query, max_results?, region?, safe?}',
   scrape_page: 'Fetch & strip HTML to clean text. args: {url, max_bytes?}',
   download_file: 'Download URL to workspace. args: {url, path}',
@@ -279,14 +278,14 @@ const ToolRegistry = {
           // Produce a conservative placeholder; keep simple JSON (quote strings)
           let sample = '""';
           if (/^(true|false|null|\[|\{|\d)/i.test(def)) sample = def;    // keep obvious JSON
-          else if (def) sample = `"${def.replace(/^['"]|['"]$/g,'')}"`;  // strip quotes if present
+          else if (def) sample = `"${def.replace(/^['"]|['"]$/g, '')}"`;  // strip quotes if present
           return [key.replace(/\s+/g, ''), def ? sample : '""'];
         });
     }
 
     const examplePayload =
       kvPairs.length
-        ? '{ ' + kvPairs.map(([k,v]) => `"${k}": ${v}`).join(', ') + ' }'
+        ? '{ ' + kvPairs.map(([k, v]) => `"${k}": ${v}`).join(', ') + ' }'
         : '{ }';
 
     return [
@@ -303,37 +302,37 @@ const ToolRegistry = {
   // This example shows the complete pattern for implementing a tool
   async example_tool(args, ctx) {
     // Step 1: Extract and validate parameters
-    const { 
+    const {
       required_param,           // Required parameter
       optional_param = 'default' // Optional with default
     } = args || {};
-    
+
     // Step 2: Validate required parameters
     assertString(required_param, 'required_param');
-    
+
     // Step 3: Implement the tool logic
     try {
       // Example: Do some work here
       logger.debug(`Executing example_tool with param: ${required_param}`);
-      
+
       // Check for cancellation in long operations
       if (ctx.signal?.aborted) {
         throw new AppError('Operation cancelled', 'ABORTED');
       }
-      
+
       // Simulate some work
       const result = `Processed: ${required_param} with option: ${optional_param}`;
-      
+
       // Step 4: Return concise, useful result (auto-truncated)
       return truncate(result);
-      
+
     } catch (error) {
       // Step 5: Handle errors with helpful messages
       if (error instanceof AppError) throw error;
       throw new AppError(`Failed to execute example_tool: ${error.message}`, 'TOOL_ERROR');
     }
   },
-  
+
   // META-TOOL: Define new tools at runtime
   // This allows the AI to create tools it needs on the fly
   async define_tool(args, ctx) {
@@ -382,8 +381,8 @@ const ToolRegistry = {
       .map(d => (d.isDirectory() ? d.name + '/' : d.name));
     const filtered = pattern
       ? names.filter(n => {
-          try { return new RegExp(pattern).test(n); } catch { return false; }
-        })
+        try { return new RegExp(pattern).test(n); } catch { return false; }
+      })
       : names;
     return JSON.stringify(filtered, null, 2);
   },
@@ -419,7 +418,7 @@ const ToolRegistry = {
     const raw = await res.text();
     let out = raw;
     if (as === 'json') {
-      try { out = JSON.stringify(JSON.parse(raw), null, 2); } catch {}
+      try { out = JSON.stringify(JSON.parse(raw), null, 2); } catch { }
     }
     if (typeof max_bytes === 'number') out = out.slice(0, max_bytes);
     return truncate(`Status: ${res.status}\n${out}`);
@@ -444,7 +443,7 @@ const ToolRegistry = {
       try {
         const u = rawUrl.startsWith('/l/?kh=') ? new URL('https://duckduckgo.com' + rawUrl) : new URL(rawUrl, 'https://duckduckgo.com');
         finalUrl = u.searchParams.get('uddg') || u.toString();
-      } catch {}
+      } catch { }
       if (!/^https?:/i.test(finalUrl)) continue;
       items.push({ title, url: finalUrl });
     }
@@ -511,9 +510,9 @@ const ToolRegistry = {
   // - Return useful information
   // - Handle errors gracefully
   // - Keep outputs concise (they're auto-truncated)
-  
+
   // Common tool patterns to implement:
-  
+
   // File tool example:
   // async write_file(args, ctx) {
   //   const { path: filePath, content } = args || {};
@@ -522,7 +521,7 @@ const ToolRegistry = {
   //   fs.writeFileSync(fullPath, content || '', 'utf8');
   //   return `Wrote ${Buffer.byteLength(content || '')} bytes to ${filePath}`;
   // }
-  
+
   // Web tool example:
   // async fetch_url(args, ctx) {
   //   const { url } = args || {};
@@ -531,7 +530,7 @@ const ToolRegistry = {
   //   const text = await response.text();
   //   return truncate(`Status: ${response.status}\n${text}`);
   // }
-  
+
   // Analysis tool example:
   // async analyze_text(args, ctx) {
   //   const { text, analysis_type } = args || {};
@@ -849,7 +848,7 @@ function parseToolCalls(text) {
 
 async function executeTools(calls, ctx) {
   const results = [];
-  
+
   for (const call of calls) {
     const tool = ToolRegistry[call.name];
     if (!tool) {
@@ -859,23 +858,23 @@ async function executeTools(calls, ctx) {
       });
       continue;
     }
-    
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), CONFIG.toolTimeoutMs);
-    
+
     try {
       const output = await tool(call.args, { ...ctx, signal: controller.signal });
       results.push({ name: call.name, output: truncate(output) });
     } catch (e) {
-      results.push({ 
-        name: call.name, 
-        error: e.message || 'Tool execution failed' 
+      results.push({
+        name: call.name,
+        error: e.message || 'Tool execution failed'
       });
     } finally {
       clearTimeout(timeout);
     }
   }
-  
+
   return results;
 }
 
@@ -913,7 +912,7 @@ async function runAgent({ task, model, provider: providerHint, openaiKey, anthro
 
     if (toolCalls.length > 0) {
       logger.info(`Found ${toolCalls.length} tool call(s)`);
-      
+
       if (!yolo) {
         console.log('\n=== Tool Calls Detected ===');
         toolCalls.forEach(c => {
@@ -922,21 +921,21 @@ async function runAgent({ task, model, provider: providerHint, openaiKey, anthro
         console.log('\nRun with --yolo to execute automatically');
         return content;
       }
-      
+
       const results = await executeTools(toolCalls, { cwd });
-      const toolOutput = results.map(r => 
-        r.error 
+      const toolOutput = results.map(r =>
+        r.error
           ? `> ${r.name}: ERROR: ${r.error}`
           : `> ${r.name}: ${r.output}`
       ).join('\n');
-      
-      messages.push({ 
-        role: 'user', 
-        content: `[TOOL OUTPUT]\n${toolOutput}` 
+
+      messages.push({
+        role: 'user',
+        content: `[TOOL OUTPUT]\n${toolOutput}`
       });
       continue;
     }
-    
+
     if (done || /<<done>>/i.test(content) || turn === CONFIG.maxTurns - 1) {
       return content;
     }
@@ -954,10 +953,12 @@ async function runAgent({ task, model, provider: providerHint, openaiKey, anthro
 
 // ======== CLI INTERFACE ========
 function parseArgs(argv) {
-  const args = { task: '', model: '', provider: '', yolo: false, cwd: process.cwd(),
-    openaiKey: '', anthropicKey: '', geminiKey: '', saveKeys: false };
+  const args = {
+    task: '', model: '', provider: '', yolo: false, cwd: process.cwd(),
+    openaiKey: '', anthropicKey: '', geminiKey: '', saveKeys: false
+  };
   const positional = [];
-  
+
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--model' || arg === '-m') { args.model = argv[++i]; }
@@ -971,7 +972,7 @@ function parseArgs(argv) {
     else if (!arg.startsWith('-')) { positional.push(arg); }
     else { console.warn(`[WARN] Unknown flag ${arg} (ignored)`); }
   }
-  
+
   args.task = positional.join(' ').trim();
   return args;
 }
@@ -981,7 +982,7 @@ async function main() {
     const args = parseArgs(process.argv);
     // Load .env early so any provider base URLs or keys set there are visible
     loadDotEnvToProcess(args.cwd);
-    
+
     if (!args.task) {
       console.log(`
 Simple Agent Runner
@@ -1015,15 +1016,15 @@ TO CREATE YOUR AGENT:
 `);
       process.exit(0);
     }
-    
+
     logger.info(`Starting agent with task: ${args.task}`);
-    
+
     const result = await runAgent(args);
-    
+
     console.log('\n=== Agent Output ===');
     console.log(result);
     console.log('====================\n');
-    
+
   } catch (error) {
     if (error instanceof AppError) {
       logger.error(`${error.code}: ${error.message}`);
