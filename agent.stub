@@ -1,0 +1,1039 @@
+#!/usr/bin/env node
+'use strict';
+
+// ======== HEADER ========
+// Simple Agentic Stub - One-file agent runner with tool calling
+// Purpose: Minimal scaffold for AI to fill in tool implementations
+// Usage:
+//   node agent.js "Your task here"
+//   node agent.js "Your task" --yolo              # Auto-execute tools
+//   node agent.js "Your task" --model mistral-small # Choose Ollama model
+//   node agent.js "Your task" --cwd ./workspace   # Set working dir
+//
+// Environment Variables:
+//   OLLAMA_HOST      - Default: http://localhost:11434
+//   (no cloud API keys needed)  // Ollama only
+
+// ======== CONFIGURATION ========
+const CONFIG = {
+  logLevel: process.env.LOG_LEVEL || 'info',
+  maxTurns: 5,
+  toolTimeoutMs: 30_000,
+  maxToolOutputChars: 4096, // Prevent context explosion from large outputs
+};
+
+// Small helpers to render tool lists for instructions
+function toolListInline() {
+  return Object.keys(ToolRegistry).join(', ');
+}
+
+function toolBullets() {
+  return Object.keys(ToolRegistry)
+    .map(n => `- **${n}** — ${TOOL_DOCS[n] || 'See tool_help'}`)
+    .join('\n');
+}
+
+// ======== UTILITIES ========
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const readline = require('readline');
+
+const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
+const level = LOG_LEVELS[CONFIG.logLevel] ?? LOG_LEVELS.info;
+const logger = {
+  debug: (...a) => level <= 0 && console.error('[DEBUG]', ...a),
+  info:  (...a) => level <= 1 && console.log('[INFO]', ...a),
+  warn:  (...a) => level <= 2 && console.warn('[WARN]', ...a),
+  error: (...a) => level <= 3 && console.error('[ERROR]', ...a),
+};
+
+class AppError extends Error {
+  constructor(message, code = 'ERROR', exitCode = 2) {
+    super(message);
+    this.name = 'AppError';
+    this.code = code;
+    this.exitCode = exitCode;
+  }
+}
+
+// Helper to validate required string parameters
+function assertString(value, name) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new AppError(`${name} must be a non-empty string`, 'VALIDATION');
+  }
+  return value.trim();
+}
+
+// --- Minimal .env loader (no deps) ---
+function loadDotEnvToProcess(cwd) {
+  try {
+    const envPath = path.join(cwd, '.env');
+    if (!fs.existsSync(envPath)) return;
+    const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+    for (const line of lines) {
+      const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+      if (!m) continue;
+      const key = m[1];
+      let val = m[2];
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (!(key in process.env)) process.env[key] = val;
+    }
+  } catch (e) {
+    logger.warn('Failed to load .env:', e.message);
+  }
+}
+
+// --- Hidden input prompt (TTY only) ---
+function promptHidden(query) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const onData = (char) => {
+      char = String(char);
+      // redraw with asterisks
+      if (char === '\n' || char === '\r' || char === '\u0004') {
+        process.stdout.write('\n');
+        rl.input.removeListener('data', onData);
+      } else {
+        const len = rl.line.length;
+        process.stdout.clearLine(0);
+        process.stdout.cursorTo(0);
+        process.stdout.write(query + '*'.repeat(len));
+      }
+    };
+    rl.question(query, (value) => {
+      rl.history = rl.history.slice(1);
+      rl.close();
+      resolve(value.trim());
+    });
+    rl.input.on('data', onData);
+  });
+}
+
+// --- Ensure API key with CLI/env/.env/prompt fallback ---
+async function ensureApiKey({ envName, cliValue, promptLabel, cwd, saveToEnv=false }) {
+  let key = (cliValue || process.env[envName] || '').trim();
+  if (!key) {
+    loadDotEnvToProcess(cwd);
+    key = (process.env[envName] || '').trim();
+  }
+  if (!key) {
+    if (!(process.stdin.isTTY && process.stdout.isTTY)) {
+      throw new AppError(`${envName} not set and no TTY to prompt. Set ${envName} or pass a --${envName.toLowerCase().replace(/_api_/,'-')} flag.`, 'CONFIG');
+    }
+    key = await promptHidden(`${promptLabel} (input hidden): `);
+    if (!key) throw new AppError(`${envName} is required`, 'CONFIG');
+    if (saveToEnv) {
+      const envPath = path.join(cwd, '.env');
+      fs.appendFileSync(envPath, `\n${envName}=${key}\n`);
+      logger.info(`Saved ${envName} to .env (workspace-local)`);
+    }
+    process.env[envName] = key;
+  }
+  return key;
+}
+
+// Helper to ensure file paths don't escape working directory
+function safePath(baseDir, targetPath) {
+  const base = path.resolve(baseDir);
+  const resolved = path.resolve(base, String(targetPath || ''));
+  const rel = path.relative(base, resolved);
+  if (rel === '' || rel === '.') return resolved;
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new AppError(`Path escapes working directory: ${targetPath}`, 'SECURITY');
+  }
+  return resolved;
+}
+
+// Truncate long outputs to avoid context explosion
+function truncate(text, maxChars = CONFIG.maxToolOutputChars) {
+  const str = String(text || '');
+  if (str.length > maxChars) {
+    return str.slice(0, maxChars) + `\n...[truncated ${str.length - maxChars} chars]`;
+  }
+  return str;
+}
+
+// Tolerant JSON parser for LLM-generated output
+// Handles common LLM mistakes like trailing commas, single quotes, unquoted keys
+function tryParseJSON(s) {
+  // First try strict parsing
+  try { return JSON.parse(s); } catch {}
+
+  // Light fixups for common LLM mistakes
+  const relaxed = s
+    .replace(/,\s*}/g, '}')      // Remove trailing commas in objects
+    .replace(/,\s*]/g, ']')       // Remove trailing commas in arrays
+    .replace(/'/g, '"')           // Replace single quotes with double quotes
+    .replace(/(\w+):/g, '"$1":'); // Add quotes to unquoted keys
+
+  try {
+    return JSON.parse(relaxed);
+  } catch (e) {
+    // If still fails, throw original error for debugging
+    throw new Error(`Invalid JSON: ${e.message}`);
+  }
+}
+
+// ======== TOOL REGISTRY ========
+// --- Tool docs used for quick help (optional but helpful) ---
+const TOOL_DOCS = {
+  list_files: 'List files in workspace. args: {path=".", pattern?}',
+  read_file: 'Read text file. args: {path, max_bytes?}',
+  write_file: 'Write text file. args: {path, content}',
+  fetch_url: 'HTTP(S) fetch. args: {url, method?, headers?, body?, as?=text|json, max_bytes?}',
+  define_tool: 'Define a new tool at runtime. args: {name, code}',
+  // If you added these tools earlier, keep their docs here:
+  search_web: 'DuckDuckGo HTML search. args: {query, max_results?, region?, safe?}',
+  scrape_page: 'Fetch & strip HTML to clean text. args: {url, max_bytes?}',
+  download_file: 'Download URL to workspace. args: {url, path}',
+  delete_file: 'Delete a workspace file. args: {path}'
+};
+/*
+AI INSTRUCTIONS FOR IMPLEMENTING TOOLS:
+
+1. TOOL NAMING:
+   - Use snake_case (e.g., fetch_data, write_report)
+   - Be specific about what the tool does
+   - Avoid generic names like 'process' or 'handle'
+
+2. TOOL STRUCTURE:
+   - Each tool is an async function: async tool_name(args, ctx)
+   - Parameters:
+     * args: Object containing tool arguments from the LLM
+     * ctx: Context object with { cwd: working_directory, signal: abort_signal }
+   - Return: String with the result (keep it under 2KB for context efficiency)
+   - Errors: Throw AppError with helpful messages
+
+3. TOOL IMPLEMENTATION GUIDELINES:
+   - Validate all required parameters at the start
+   - Use try-catch for external operations
+   - Keep outputs concise but informative
+   - Include relevant details the LLM needs to continue
+   - For file operations, use ctx.cwd as the base directory
+   - For long operations, check ctx.signal.aborted periodically
+   - Return structured information when possible (lists, key points)
+
+4. WHEN LLM SHOULD CALL TOOLS:
+   - Make tool descriptions clear about WHEN to use them
+   - Include what inputs are expected
+   - Describe what the tool returns
+   - Tools are called with syntax: <<tool:name {"param":"value"}>>
+
+5. EXAMPLE TOOL CATEGORIES TO IMPLEMENT:
+   - File Operations: read_file, write_file, list_files, search_files
+   - Web Operations: fetch_url, search_web, scrape_page
+   - Data Processing: analyze_data, extract_info, summarize_text
+   - Code Operations: execute_code, analyze_code, generate_code
+   - Communication: send_email, post_message, notify_user
+   - Domain Specific: Your agent's specialized tools
+*/
+
+const ToolRegistry = {
+  // Dynamic tool signature helper
+  async help(args, ctx) {
+    const { tool } = args || {};
+    const names = Object.keys(ToolRegistry).sort();
+
+    // List mode
+    if (!tool) {
+      return [
+        'Tools:',
+        names.join(', '),
+        '',
+        'Usage:',
+        '  <<tool:help {"tool":"TOOL_NAME"}>>',
+        '',
+        'Tip: Ask for a tool then copy the example payload from the output.'
+      ].join('\n');
+    }
+
+    const fn = ToolRegistry[tool];
+    if (!fn) return `Unknown tool: ${tool}\nAvailable: ${names.join(', ')}`;
+
+    const src = fn.toString();
+
+    // Try to capture a short signature line (method or arrow)
+    const sig =
+      (src.match(/async\s+\w+\s*\([^)]*\)/)?.[0]) ||          // async tool(args, ctx)
+      (src.match(/async\s*\(\s*[^)]*\s*\)\s*=>/)?.[0]) ||     // async (args, ctx) =>
+      (src.match(/\bfunction\s+\w+\s*\([^)]*\)/)?.[0]) ||     // function tool(args, ctx)
+      `${tool}(args, ctx)`;
+
+    // Heuristic: extract destructured args to suggest param keys/defaults
+    // Looks for: const { a, b = 1, c: alias = 'x' } = args || {};
+    const d = src.match(/const\s*{\s*([^}]*)\s*}\s*=\s*args\s*\|\|\s*{}/);
+    let kvPairs = [];
+    if (d && d[1]) {
+      kvPairs = d[1]
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+        .map(p => {
+          // Normalize "key: alias = default" | "key = default" | "key"
+          const [left, defPart] = p.split('=').map(s => s && s.trim());
+          const key = (left.includes(':') ? left.split(':')[0] : left).trim();
+          const def = (defPart || '').trim();
+          // Produce a conservative placeholder; keep simple JSON (quote strings)
+          let sample = '""';
+          if (/^(true|false|null|\[|\{|\d)/i.test(def)) sample = def;    // keep obvious JSON
+          else if (def) sample = `"${def.replace(/^['"]|['"]$/g,'')}"`;  // strip quotes if present
+          return [key.replace(/\s+/g, ''), def ? sample : '""'];
+        });
+    }
+
+    const examplePayload =
+      kvPairs.length
+        ? '{ ' + kvPairs.map(([k,v]) => `"${k}": ${v}`).join(', ') + ' }'
+        : '{ }';
+
+    return [
+      `Tool: ${tool}`,
+      `Signature: ${sig}`,
+      kvPairs.length
+        ? `Params (guessed): ${kvPairs.map(([k]) => k).join(', ')}`
+        : 'Params: (args, ctx)',
+      `Usage: <<tool:${tool} ${examplePayload}>>`
+    ].join('\n');
+  },
+
+  // PLACEHOLDER TOOL - Replace this with your actual tools
+  // This example shows the complete pattern for implementing a tool
+  async example_tool(args, ctx) {
+    // Step 1: Extract and validate parameters
+    const { 
+      required_param,           // Required parameter
+      optional_param = 'default' // Optional with default
+    } = args || {};
+    
+    // Step 2: Validate required parameters
+    assertString(required_param, 'required_param');
+    
+    // Step 3: Implement the tool logic
+    try {
+      // Example: Do some work here
+      logger.debug(`Executing example_tool with param: ${required_param}`);
+      
+      // Check for cancellation in long operations
+      if (ctx.signal?.aborted) {
+        throw new AppError('Operation cancelled', 'ABORTED');
+      }
+      
+      // Simulate some work
+      const result = `Processed: ${required_param} with option: ${optional_param}`;
+      
+      // Step 4: Return concise, useful result (auto-truncated)
+      return truncate(result);
+      
+    } catch (error) {
+      // Step 5: Handle errors with helpful messages
+      if (error instanceof AppError) throw error;
+      throw new AppError(`Failed to execute example_tool: ${error.message}`, 'TOOL_ERROR');
+    }
+  },
+  
+  // META-TOOL: Define new tools at runtime
+  // This allows the AI to create tools it needs on the fly
+  async define_tool(args, ctx) {
+    const { name, code } = args || {};
+    const toolName = assertString(name, 'name');
+    assertString(code, 'code');
+    if (!/^[a-zA-Z0-9_]{1,32}$/.test(toolName)) {
+      throw new AppError('Tool name must be alphanumeric with underscores, max 32 chars');
+    }
+
+    // Wrap user's code as an async function that receives (args, ctx)
+    const wrappedSrc = `
+      (async function ${toolName}(args, ctx) {
+        ${code}
+      })
+    `;
+    let compiled;
+    try {
+      const script = new vm.Script(wrappedSrc, { filename: `tool:${toolName}`, displayErrors: true });
+      const sandbox = vm.createContext({
+        console, fetch, setTimeout, clearTimeout, URL, Buffer,
+        AppError, assertString, truncate  // allow helpers
+      });
+      compiled = script.runInContext(sandbox);
+      if (typeof compiled !== 'function') throw new Error('Tool did not export a function');
+    } catch (e) {
+      throw new AppError(`Failed to compile tool '${toolName}': ${e.message}`);
+    }
+
+    ToolRegistry[toolName] = async (toolArgs, toolCtx) => {
+      try {
+        const out = await compiled(toolArgs, toolCtx);
+        return truncate(out);
+      } catch (e) {
+        throw new AppError(`Tool '${toolName}' failed: ${e.message}`, 'TOOL_ERROR');
+      }
+    };
+    return `Tool '${toolName}' defined successfully`;
+  },
+
+  // --- Starter file tools ---
+  async list_files(args, ctx) {
+    const { path: p = '.', pattern } = args || {};
+    const dir = safePath(ctx.cwd, p);
+    const names = fs.readdirSync(dir, { withFileTypes: true })
+      .map(d => (d.isDirectory() ? d.name + '/' : d.name));
+    const filtered = pattern
+      ? names.filter(n => {
+          try { return new RegExp(pattern).test(n); } catch { return false; }
+        })
+      : names;
+    return JSON.stringify(filtered, null, 2);
+  },
+
+  async read_file(args, ctx) {
+    const { path: p, max_bytes } = args || {};
+    assertString(p, 'path');
+    const full = safePath(ctx.cwd, p);
+    let data = fs.readFileSync(full, 'utf8');
+    if (typeof max_bytes === 'number') data = data.slice(0, max_bytes);
+    return truncate(data);
+  },
+
+  async write_file(args, ctx) {
+    const { path: p, content = '' } = args || {};
+    assertString(p, 'path');
+    const full = safePath(ctx.cwd, p);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, content, 'utf8');
+    return `Wrote ${Buffer.byteLength(content, 'utf8')} bytes to ${p}`;
+  },
+
+  // --- Minimal web tool ---
+  async fetch_url(args, ctx) {
+    const { url, method = 'GET', headers = {}, body, max_bytes, as = 'text' } = args || {};
+    assertString(url, 'url');
+    const res = await fetch(url, {
+      method,
+      headers: { 'User-Agent': 'agent-builder/1.0', ...(headers || {}) },
+      body: body ? (typeof body === 'string' ? body : JSON.stringify(body)) : undefined,
+      signal: ctx.signal
+    });
+    const raw = await res.text();
+    let out = raw;
+    if (as === 'json') {
+      try { out = JSON.stringify(JSON.parse(raw), null, 2); } catch {}
+    }
+    if (typeof max_bytes === 'number') out = out.slice(0, max_bytes);
+    return truncate(`Status: ${res.status}\n${out}`);
+  },
+
+  // Basic web search via DuckDuckGo HTML (no API key)
+  async search_web(args, ctx) {
+    const { query, max_results = 6 } = args || {};
+    assertString(query, 'query');
+    const q = encodeURIComponent(query);
+    const url = `https://duckduckgo.com/html/?q=${q}`;
+    const res = await fetch(url, { signal: ctx.signal, headers: { 'User-Agent': 'agent-builder/1.0' } });
+    const html = await res.text();
+    const items = [];
+    const re = /<a[^>]+class=\"[^\"]*result__a[^\"]*\"[^>]+href=\"([^\"]+)\"[^>]*>(.*?)<\/a>/g;
+    let m;
+    while ((m = re.exec(html)) && items.length < Math.max(1, Math.min(20, max_results))) {
+      const rawUrl = m[1];
+      const title = m[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+      // Skip DDG redirector when present
+      let finalUrl = rawUrl;
+      try {
+        const u = rawUrl.startsWith('/l/?kh=') ? new URL('https://duckduckgo.com' + rawUrl) : new URL(rawUrl, 'https://duckduckgo.com');
+        finalUrl = u.searchParams.get('uddg') || u.toString();
+      } catch {}
+      if (!/^https?:/i.test(finalUrl)) continue;
+      items.push({ title, url: finalUrl });
+    }
+    return JSON.stringify(items, null, 2);
+  },
+
+  // Minimal page scraper that fetches and strips HTML to text
+  async scrape_page(args, ctx) {
+    const { url, max_bytes = 20000 } = args || {};
+    assertString(url, 'url');
+    const res = await fetch(url, { signal: ctx.signal, headers: { 'User-Agent': 'agent-builder/1.0' } });
+    const html = await res.text();
+    const cleaned = html
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, max_bytes);
+    return truncate(cleaned);
+  },
+
+  // Download a URL to a safe path within the workspace
+  async download_file(args, ctx) {
+    const { url, path: p } = args || {};
+    assertString(url, 'url');
+    assertString(p, 'path');
+    const full = safePath(ctx.cwd, p);
+    const res = await fetch(url, { signal: ctx.signal, headers: { 'User-Agent': 'agent-builder/1.0' } });
+    if (!res.ok) throw new AppError(`download_file failed: HTTP ${res.status}`, 'TOOL_ERROR');
+    const ab = await res.arrayBuffer();
+    const buf = Buffer.from(ab);
+    fs.mkdirSync(require('path').dirname(full), { recursive: true });
+    fs.writeFileSync(full, buf);
+    return `Saved ${buf.length} bytes to ${p}`;
+  },
+
+  // Delete a file (no error if it doesn't exist)
+  async delete_file(args, ctx) {
+    const { path: p } = args || {};
+    assertString(p, 'path');
+    const full = safePath(ctx.cwd, p);
+    try {
+      fs.unlinkSync(full);
+      return `Deleted ${p}`;
+    } catch (e) {
+      if (e.code === 'ENOENT') return `No-op: ${p} not found`;
+      throw new AppError(`delete_file failed: ${e.message}`, 'TOOL_ERROR');
+    }
+  },
+
+  // Tool docs listing helper
+  async tool_help(args, ctx) {
+    const names = Object.keys(ToolRegistry);
+    const lines = names.map(n => `- ${n}: ${TOOL_DOCS[n] || 'No description available'}`);
+    return lines.join('\n');
+  },
+
+  // TODO: ADD YOUR TOOLS HERE
+  // Copy the pattern above and implement tools for your specific agent
+  // Remember to:
+  // - Give tools descriptive names
+  // - Validate all inputs
+  // - Return useful information
+  // - Handle errors gracefully
+  // - Keep outputs concise (they're auto-truncated)
+  
+  // Common tool patterns to implement:
+  
+  // File tool example:
+  // async write_file(args, ctx) {
+  //   const { path: filePath, content } = args || {};
+  //   assertString(filePath, 'path');
+  //   const fullPath = safePath(ctx.cwd, filePath);
+  //   fs.writeFileSync(fullPath, content || '', 'utf8');
+  //   return `Wrote ${Buffer.byteLength(content || '')} bytes to ${filePath}`;
+  // }
+  
+  // Web tool example:
+  // async fetch_url(args, ctx) {
+  //   const { url } = args || {};
+  //   assertString(url, 'url');
+  //   const response = await fetch(url);
+  //   const text = await response.text();
+  //   return truncate(`Status: ${response.status}\n${text}`);
+  // }
+  
+  // Analysis tool example:
+  // async analyze_text(args, ctx) {
+  //   const { text, analysis_type } = args || {};
+  //   // Perform analysis
+  //   return `Analysis: [findings, insights, recommendations]`;
+  // }
+};
+
+// ======== AGENT CONFIGURATION ========
+// ======== Universal scaffold + rules ========
+const AGENT_INSTRUCTION = `
+// TODO: AI, modify this section based on user requirements
+// Fill in [BRACKETED] placeholders to create the specific agent
+// IMPORTANT: Do NOT call any tools until you have replaced ALL [BRACKETED] placeholders
+// in the section below with concrete content. If something is ambiguous, pick a sensible
+// default and proceed — do not ask the user to clarify.
+
+You are a [ROLE/TYPE] specialized in [DOMAIN/EXPERTISE].
+
+Your approach:
+1. [First step for this type of agent]
+2. [Second step in the workflow]
+3. [Continue with domain-specific steps]
+4. [Final output/verification step]
+
+Output format:
+- [What format: Markdown, JSON, code files, etc.]
+- [What to include: sections, fields, structure]
+- [Where to save: ./output/, ./reports/, etc.]
+
+Focus on:
+- [Key quality criteria for this domain]
+- [Important considerations]
+- [Specific requirements]
+`;
+
+// Universal tool instructions (don't modify)
+const TOOL_INSTRUCTIONS = `
+When you need to use a tool, emit the exact syntax:
+<<tool:tool_name {"parameter": "value"}>>
+
+Available tools: ${toolListInline()}
+
+Quick reference:
+${toolBullets()}
+
+Remember:
+- Use strict JSON in tool calls (no trailing commas, quoted keys).
+- Make multiple focused calls instead of one huge one.
+- If a step fails, try an alternative and explain what changed.
+- Keep outputs concise and well-organized.
+- Before any tool calls, rewrite the bracketed scaffold with concrete values.
+- If you must assume something, state the assumption briefly and continue.
+- If you’re unsure about a tool’s parameters, call the helper: <<tool:help {"tool":"TOOL_NAME"}>>
+`;
+
+// Combine them (single, final system message)
+const FULL_INSTRUCTION = `${AGENT_INSTRUCTION.trim()}\n\n${TOOL_INSTRUCTIONS.trim()}`;
+
+// ======== PROVIDERS ========
+class OllamaProvider {
+  constructor({ model = 'mistral-small', host = process.env.OLLAMA_HOST || 'http://localhost:11434' }) {
+    this.model = model;
+    this.host = host.replace(/\/$/, '');
+  }
+
+  async complete({ messages, signal }) {
+    try {
+      const res = await fetch(`${this.host}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: this.model, messages, stream: false }),
+        signal
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      return { content: data.message?.content || '', done: data.done };
+    } catch (e) {
+      throw new AppError(`Ollama error: ${e.message}`, 'PROVIDER');
+    }
+  }
+}
+
+class OpenAIProvider {
+  constructor({ model = 'gpt-4o-mini', apiKey, baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com' }) {
+    this.model = model;
+    this.apiKey = apiKey;
+    this.baseUrl = baseUrl.replace(/\/$/, '');
+  }
+  async complete({ messages, signal }) {
+    try {
+      const res = await fetch(`${this.baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({ model: this.model, messages, stream: false }),
+        signal,
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+      const data = JSON.parse(text);
+      const content = data.choices?.[0]?.message?.content ?? '';
+      const finish = data.choices?.[0]?.finish_reason ?? 'stop';
+      return { content, done: finish !== 'length' };
+    } catch (e) {
+      throw new AppError(`OpenAI error: ${e.message}`, 'PROVIDER');
+    }
+  }
+}
+
+class AnthropicProvider {
+  constructor({
+    model = 'claude-3-5-sonnet-latest',
+    apiKey,
+    version = process.env.ANTHROPIC_VERSION || '2023-06-01',
+    baseUrl = process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com'
+  }) {
+    this.model = model;
+    this.apiKey = apiKey;
+    this.version = version;
+    this.baseUrl = baseUrl.replace(/\/$/, '');
+  }
+  async complete({ messages, signal }) {
+    try {
+      const system = messages.filter(m => m.role === 'system').map(m => String(m.content || '')).join('\n');
+      const convo = messages
+        .filter(m => m.role !== 'system')
+        .map(m => ({
+          role: m.role === 'assistant' ? 'assistant' : 'user',
+          content: [{ type: 'text', text: String(m.content || '') }]
+        }));
+      const body = { model: this.model, max_tokens: 1024, messages: convo };
+      if (system) body.system = system;
+
+      const res = await fetch(`${this.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': this.version
+        },
+        body: JSON.stringify(body),
+        signal
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+      const data = JSON.parse(text);
+      const parts = data.content || [];
+      const firstText = parts.find(p => p && (p.text || p.type === 'text'))?.text ?? '';
+      return { content: firstText, done: true };
+    } catch (e) {
+      throw new AppError(`Anthropic error: ${e.message}`, 'PROVIDER');
+    }
+  }
+}
+
+class GeminiProvider {
+  constructor({ model = 'gemini-2.0-flash', apiKey, baseUrl = 'https://generativelanguage.googleapis.com' }) {
+    this.model = model;
+    this.apiKey = apiKey;
+    this.baseUrl = baseUrl.replace(/\/$/, '');
+  }
+  async complete({ messages, signal }) {
+    try {
+      const system = messages.filter(m => m.role === 'system').map(m => String(m.content || '')).join('\n');
+      const contents = messages
+        .filter(m => m.role !== 'system')
+        .map(m => ({
+          role: m.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: String(m.content || '') }]
+        }));
+      const body = { contents };
+      if (system) body.systemInstruction = { parts: [{ text: system }] };
+
+      const url = `${this.baseUrl}/v1beta/models/${encodeURIComponent(this.model)}:generateContent?key=${encodeURIComponent(this.apiKey)}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+      const data = JSON.parse(text);
+      const cand = data.candidates?.[0];
+      const parts = cand?.content?.parts || [];
+      const out = parts.map(p => p.text || '').join('');
+      return { content: out, done: true };
+    } catch (e) {
+      throw new AppError(`Gemini error: ${e.message}`, 'PROVIDER');
+    }
+  }
+}
+
+function splitPrefixedModel(spec) {
+  const s = (spec || '').trim();
+  const m = s.match(/^([a-z]+):(.+)$/i);
+  if (m) {
+    const p = m[1].toLowerCase();
+    if (p === 'openai' || p === 'anthropic' || p === 'gemini' || p === 'ollama') {
+      return { provider: p, model: m[2] };
+    }
+  }
+  return { provider: '', model: s };
+}
+
+function inferProviderFromModel(model) {
+  const s = (model || '').toLowerCase();
+  if (!s) return '';
+  // Only infer OpenAI for known OpenAI model families; avoid mapping gpt-oss, etc.
+  if (/^(gpt-4|gpt-4o|gpt-4\.1|gpt-3\.5|o3|o4)/.test(s) || s.startsWith('gpt-4o-mini')) return 'openai';
+  if (s.startsWith('claude') || s.includes('sonnet') || s.includes('haiku') || s.includes('opus')) return 'anthropic';
+  if (s.startsWith('gemini') || s.includes('1.5') || s.includes('2.0') || s.includes('flash')) return 'gemini';
+  return '';
+}
+
+async function createProvider({ modelSpec, providerHint = '', keys = {}, cwd = process.cwd(), saveKeys = false }) {
+  const { provider: prefixProvider, model: stripped } = splitPrefixedModel(modelSpec || '');
+  let provider = (providerHint || prefixProvider || '').toLowerCase();
+  let model = stripped || modelSpec || '';
+
+  // Default to ollama unless an explicit provider is set or model clearly implies a cloud provider
+  if (!provider) provider = inferProviderFromModel(model) || 'ollama';
+  if (!model) {
+    if (provider === 'ollama') model = 'mistral-small';
+    if (provider === 'openai') model = 'gpt-4o-mini';
+    if (provider === 'anthropic') model = 'claude-3-5-sonnet-latest';
+    if (provider === 'gemini') model = 'gemini-2.0-flash';
+  }
+
+  switch (provider) {
+    case 'openai': {
+      const apiKey = await ensureApiKey({
+        envName: 'OPENAI_API_KEY',
+        cliValue: keys.openaiKey,
+        promptLabel: 'Enter OPENAI_API_KEY',
+        cwd,
+        saveToEnv: saveKeys
+      });
+      return new OpenAIProvider({ model, apiKey });
+    }
+    case 'anthropic': {
+      const apiKey = await ensureApiKey({
+        envName: 'ANTHROPIC_API_KEY',
+        cliValue: keys.anthropicKey,
+        promptLabel: 'Enter ANTHROPIC_API_KEY',
+        cwd,
+        saveToEnv: saveKeys
+      });
+      return new AnthropicProvider({ model, apiKey });
+    }
+    case 'gemini': {
+      const apiKey = await ensureApiKey({
+        envName: 'GEMINI_API_KEY',
+        cliValue: keys.geminiKey || process.env.GOOGLE_API_KEY, // accept GOOGLE_API_KEY too
+        promptLabel: 'Enter GEMINI_API_KEY (Google AI Studio key)',
+        cwd,
+        saveToEnv: saveKeys
+      });
+      return new GeminiProvider({ model, apiKey });
+    }
+    case 'ollama':
+    default:
+      return new OllamaProvider({ model: model || undefined, host: process.env.OLLAMA_HOST || 'http://localhost:11434' });
+  }
+}
+
+// ======== RUNTIME ENGINE ========
+function parseToolCalls(text) {
+  const calls = [];
+  let i = 0;
+  while (i < text.length) {
+    const start = text.indexOf('<<tool:', i);
+    if (start === -1) break;
+    const nameStart = start + '<<tool:'.length;
+    let nameEnd = nameStart;
+    while (nameEnd < text.length && /\w/.test(text[nameEnd])) nameEnd++;
+    const name = text.slice(nameStart, nameEnd);
+    // Skip whitespace to first '{'
+    let j = nameEnd;
+    while (j < text.length && /\s/.test(text[j])) j++;
+    if (text[j] !== '{') { i = nameEnd; continue; }
+    // Balanced-brace parse for JSON object
+    let depth = 0, k = j, inStr = false, esc = false;
+    for (; k < text.length; k++) {
+      const ch = text[k];
+      if (inStr) {
+        if (esc) { esc = false; }
+        else if (ch === '\\') { esc = true; }
+        else if (ch === '"') { inStr = false; }
+        continue;
+      }
+      if (ch === '"') { inStr = true; continue; }
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) { k++; break; }
+      }
+    }
+    const jsonStr = text.slice(j, k);
+    // Expect closing '>>'
+    const close = text.indexOf('>>', k);
+    if (close === -1) { i = k; continue; }
+    try {
+      calls.push({ name, args: tryParseJSON(jsonStr) });
+    } catch (e) {
+      logger.warn(`Failed to parse tool call for ${name}: ${e.message}`);
+    }
+    i = close + 2;
+  }
+  return calls;
+}
+
+async function executeTools(calls, ctx) {
+  const results = [];
+  
+  for (const call of calls) {
+    const tool = ToolRegistry[call.name];
+    if (!tool) {
+      results.push({
+        name: call.name,
+        error: `Unknown tool: ${call.name}`
+      });
+      continue;
+    }
+    
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), CONFIG.toolTimeoutMs);
+    
+    try {
+      const output = await tool(call.args, { ...ctx, signal: controller.signal });
+      results.push({ name: call.name, output: truncate(output) });
+    } catch (e) {
+      results.push({ 
+        name: call.name, 
+        error: e.message || 'Tool execution failed' 
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  
+  return results;
+}
+
+async function runAgent({ task, model, provider: providerHint, openaiKey, anthropicKey, geminiKey, saveKeys, yolo = false, cwd = process.cwd() }) {
+  const provider = await createProvider({
+    modelSpec: model,
+    providerHint,
+    keys: { openaiKey, anthropicKey, geminiKey },
+    cwd,
+    saveKeys
+  });
+  logger.info(`Provider: ${provider.constructor.name}, Model: ${provider.model || '(default)'}`);
+
+  const messages = [
+    { role: 'system', content: FULL_INSTRUCTION },
+    { role: 'user', content: task }
+  ];
+  let lastToolCallCount = 0;
+
+  for (let turn = 0; turn < CONFIG.maxTurns; turn++) {
+    logger.debug(`Turn ${turn + 1}/${CONFIG.maxTurns}`);
+
+    const { content, done } = await provider.complete({ messages });
+    logger.debug(`Response length: ${content?.length || 0} chars, done: ${done}`);
+    if (content?.trim()) { logger.debug(`Response preview: ${content.slice(0, 300).replace(/\n/g, '\\n')}...`); }
+    messages.push({ role: 'assistant', content });
+    // Skip empty responses entirely
+    if (!content?.trim()) {
+      logger.debug('Skipping empty response');
+      continue;
+    }
+
+    const toolCalls = parseToolCalls(content);
+    lastToolCallCount = toolCalls.length;
+
+    if (toolCalls.length > 0) {
+      logger.info(`Found ${toolCalls.length} tool call(s)`);
+      
+      if (!yolo) {
+        console.log('\n=== Tool Calls Detected ===');
+        toolCalls.forEach(c => {
+          console.log(`- ${c.name}: ${JSON.stringify(c.args)}`);
+        });
+        console.log('\nRun with --yolo to execute automatically');
+        return content;
+      }
+      
+      const results = await executeTools(toolCalls, { cwd });
+      const toolOutput = results.map(r => 
+        r.error 
+          ? `> ${r.name}: ERROR: ${r.error}`
+          : `> ${r.name}: ${r.output}`
+      ).join('\n');
+      
+      messages.push({ 
+        role: 'user', 
+        content: `[TOOL OUTPUT]\n${toolOutput}` 
+      });
+      continue;
+    }
+    
+    if (done || /<<done>>/i.test(content) || turn === CONFIG.maxTurns - 1) {
+      return content;
+    }
+  }
+
+  logger.error(`Max turns (${CONFIG.maxTurns}) reached without completion`);
+  logger.error(`Model: ${provider.model} | Last response had ${lastToolCallCount} tool calls`);
+  logger.error('Suggestions:');
+  logger.error('  - Try a different model (mistral-small, qwen3-coder, deepseek-r1:32b work well)');
+  logger.error('  - Increase maxTurns in CONFIG (currently 5)');
+  logger.error('  - Run with LOG_LEVEL=debug to see model responses');
+  logger.error('  - Simplify the task or break it into smaller steps');
+  throw new AppError('Max turns reached without completion');
+}
+
+// ======== CLI INTERFACE ========
+function parseArgs(argv) {
+  const args = { task: '', model: '', provider: '', yolo: false, cwd: process.cwd(),
+    openaiKey: '', anthropicKey: '', geminiKey: '', saveKeys: false };
+  const positional = [];
+  
+  for (let i = 2; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--model' || arg === '-m') { args.model = argv[++i]; }
+    else if (arg === '--provider' || arg === '-p') { args.provider = argv[++i]; }
+    else if (arg === '--cwd') { args.cwd = argv[++i]; }
+    else if (arg === '--yolo' || arg === '-y') { args.yolo = true; }
+    else if (arg === '--openai-key') { args.openaiKey = argv[++i]; }
+    else if (arg === '--anthropic-key') { args.anthropicKey = argv[++i]; }
+    else if (arg === '--gemini-key') { args.geminiKey = argv[++i]; }
+    else if (arg === '--save-keys') { args.saveKeys = true; }
+    else if (!arg.startsWith('-')) { positional.push(arg); }
+    else { console.warn(`[WARN] Unknown flag ${arg} (ignored)`); }
+  }
+  
+  args.task = positional.join(' ').trim();
+  return args;
+}
+
+async function main() {
+  try {
+    const args = parseArgs(process.argv);
+    // Load .env early so any provider base URLs or keys set there are visible
+    loadDotEnvToProcess(args.cwd);
+    
+    if (!args.task) {
+      console.log(`
+Simple Agent Runner
+
+Usage:
+  node agent.js "Your task here"
+  node agent.js "Your task" --yolo                    # Auto-execute tools
+  node agent.js "Your task" --model deepseek-r1       # Choose Ollama model
+  node agent.js "Your task" --cwd ./workspace         # Set working dir
+  node agent.js "Your task" --provider openai -m gpt-4o-mini  # Use OpenAI
+  node agent.js "Your task" --provider anthropic -m claude-3-5-sonnet
+  node agent.js "Your task" --provider gemini -m gemini-2.0-flash
+
+Examples:
+  node agent.js "Write a hello world program"
+  node agent.js "Research topic X and create a report" --yolo
+  node agent.js "Analyze this codebase" --cwd ./src
+
+Models:
+  Default: mistral-small (via Ollama)
+  Ollama: mistral-small, gpt-oss, llama3.2, deepseek-r1, qwen2.5, magistral, etc.
+  OpenAI: gpt-4o-mini, gpt-4.1, etc. (requires OPENAI_API_KEY)
+  Anthropic: claude-3-5-sonnet, haiku, opus (requires ANTHROPIC_API_KEY)
+  Gemini: gemini-2.0-flash, 1.5-flash (requires GEMINI_API_KEY)
+
+TO CREATE YOUR AGENT:
+1. Copy this file
+2. Tell AI what kind of agent you want
+3. AI will fill in the tools and customize the instructions
+4. Run your new agent!
+`);
+      process.exit(0);
+    }
+    
+    logger.info(`Starting agent with task: ${args.task}`);
+    
+    const result = await runAgent(args);
+    
+    console.log('\n=== Agent Output ===');
+    console.log(result);
+    console.log('====================\n');
+    
+  } catch (error) {
+    if (error instanceof AppError) {
+      logger.error(`${error.code}: ${error.message}`);
+      process.exit(error.exitCode);
+    }
+    logger.error('Unexpected error:', error.message);
+    process.exit(2);
+  }
+}
+
+if (require.main === module) {
+  main();
+}
