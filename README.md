@@ -1,16 +1,12 @@
-# Agent Builder 💬 
+# Agent Builder 💬
 
 **Local-first agents, zero fluff.**
 
 Chat. Build. Run.
 
-```bash
-node agent.js "Create a research agent and analyze the latest AI trends" --yolo
-```
-
 ## What is this?
 
-A streamlined stub that AI coding assistants use to create working agents instantly.
+A streamlined template (`agent.stub`) that AI coding assistants use to create working agents instantly.
 
 **You describe what you want → AI transforms the stub → Working agent in seconds**
 
@@ -20,14 +16,11 @@ Think of it as a template that AI fills in to create:
 - ⚡ Agents that create new tools on-the-fly when needed
 - 🎯 Agents that complete complex multi-step tasks autonomously
 
-**No frameworks. No dependencies. Just Node.js and AI.**
+**No frameworks. No npm dependencies. Just Node.js and AI.**
 
 ### Choose Your AI Assistant:
-- **Claude Code** - AI coding agent by Anthropic
-- **OpenAI Codex CLI** - AI coding agent by OpenAI  
-- **Google Gemini CLI** - AI coding agent by Google (FREE tier available!)
-
-All these coding tools understand natural language and can build your agent — pick any one!
+Various AI coding assistants can transform the agent stub into working agents.
+These tools understand natural language and can build your agent — pick any one that works for you!
 
 ## Getting Started
 
@@ -97,42 +90,22 @@ This command automatically does everything for you:
 
 #### 3. Start Building!
 
-Choose your AI assistant and tell it to create an agent:
-
-**For Claude Code:**
+Start your preferred AI coding assistant. For example:
 ```bash
-npx claude
+# Examples of starting different AI assistants:
+npx claude    # or
+npx codex     # or
+npx gemini    # or your preferred tool
 ```
 
-**For OpenAI Codex:**
-```bash
-npx codex
-```
-
-**For Gemini CLI:**
-```bash
-npx gemini
-```
-
-**What this does:** Starts your AI assistant so you can chat directly in the Terminal.
+**What this does:** Starts an AI assistant so you can chat directly in the Terminal.
 
 That's it! Now just tell your AI assistant what you want:
-- "Hi Claude, I need an agent that researches tech news"
+- "I need an agent that researches tech news"
 - "Create an agent that can analyze code for security issues"
 - "Build an agent that processes CSV files and creates reports"
 
-Give your AI the `agent.js` file and describe what kind of agent you need!
-
 💡 **Remember:** If you make a mistake, just tell your AI assistant to fix it - nothing will break!
-
-## How It Works
-
-1. **Give the stub to your AI assistant** (Claude Code, Codex, Cursor, etc.)
-2. **Describe the agent you want** in plain English
-3. **AI transforms the stub** into a working agent
-4. **Run it immediately** to complete your task
-
-It's like the AI Website Builder, but for creating agents instead of websites!
 
 ## 💻 Helpful Terminal Commands
 
@@ -170,26 +143,44 @@ pwd
 - **Mac**: Press `Command + C` to stop any running command
 - This is useful when you need to stop running agents or Ollama
 
-## Examples
+## Example Agent Creation Prompts
+
+Tell your AI assistant what kind of agent you need:
 
 ### Research Agent
-```bash
-node agent.js "Create a research agent and find the top 5 AI breakthroughs this week" --yolo
+```
+"Create a research agent that can search the web for information,
+analyze sources, and compile findings into structured reports"
 ```
 
 ### Code Analysis Agent
-```bash
-node agent.js "Create a code review agent and analyze this project for security issues" --yolo --cwd ./my-project
+```
+"Build a code review agent that analyzes code for security vulnerabilities,
+performance issues, and suggests improvements with detailed explanations"
 ```
 
 ### Data Processing Agent
-```bash
-node agent.js "Create a data analyst agent and analyze sales.csv for trends" --yolo
+```
+"Make a data analyst agent that processes CSV files, identifies patterns
+and trends, generates statistics, and creates visual reports"
 ```
 
 ### Content Creator Agent
-```bash
-node agent.js "Create a blog writer agent and write an article about quantum computing" --yolo
+```
+"Create a content writer agent that researches topics, outlines articles,
+writes engaging content, and formats it properly for publishing"
+```
+
+### File Organizer Agent
+```
+"Build an agent that organizes files by type, date, or content,
+removes duplicates, and creates a clean folder structure"
+```
+
+### API Integration Agent
+```
+"Create an agent that can call multiple APIs, transform data between
+formats, and handle authentication and error cases"
 ```
 
 ## The Magic: Dynamic Tool Creation
@@ -197,14 +188,14 @@ node agent.js "Create a blog writer agent and write an article about quantum com
 The agent can create any tool it needs on the fly:
 
 ```javascript
-<<tool:define_tool {"name": "fetch_weather", "code": "const r = await fetch(`https://api.weather.com/${args.city}`); return await r.json();"}>
+<<tool:define_tool {"name": "fetch_weather", "code": "const r = await fetch(`https://api.weather.com/${args.city}`); const data = await r.json(); return JSON.stringify(data, null, 2);"}>
 ```
 
 No need to pre-define everything. The agent figures it out.
 
 ## Features
 
-- **🚀 Zero Setup** - Just Node.js, nothing else
+- **🚀 Zero npm dependencies** - Just Node.js and Ollama (no npm install needed)
 - **🎯 Single File** - The entire agent in one file
 - **🔧 Extensible** - Agent creates tools as needed
 - **🛡️ Safe by Default** - Preview actions before execution (--yolo to auto-run)
@@ -232,43 +223,159 @@ Review first, then run with `--yolo` if you approve.
 
 ## Advanced Usage
 
-### Choose Your AI Model
+After your AI assistant creates an agent, you can run it with various options and features:
+
+<details>
+<summary><b>📝 Command-Line Options</b></summary>
+
 ```bash
-# Local with Ollama (default, free)
-node agent.js "Your task"
+# Basic usage
+node my-agent.js "Your task"
 
-# Use a specific Ollama model
-node agent.js "Your task" --model mixtral
-node agent.js "Your task" --model codellama
-node agent.js "Your task" --model llama3.2
+# Auto-execute tools without confirmation
+node my-agent.js "Your task" --yolo
+
+# Set working directory for file operations
+node my-agent.js "Your task" --cwd ./workspace
+
+# Override max iterations (default: 5)
+node my-agent.js "Your task" --max-turns 10
+
+# Default: Ollama with mistral-small (free, runs locally)
+node my-agent.js "Your task"  # Uses ollama:mistral-small by default
+
+# Other good Ollama models
+node my-agent.js "Your task" --model mixtral
+node my-agent.js "Your task" --model codellama
+node my-agent.js "Your task" --model llama3.2
+node my-agent.js "Your task" --model deepseek-r1
+
+# General-purpose cloud alternatives (require API keys)
+node my-agent.js "Your task" --model gpt-5-mini         # OpenAI
+node my-agent.js "Your task" --model claude-sonnet-4-5  # Anthropic
+node my-agent.js "Your task" --model gemini-2.5-flash   # Google
+
+# Or use provider:model prefix format
+node my-agent.js "Your task" --model openai:gpt-5
+node my-agent.js "Your task" --model anthropic:claude-opus-4-1
+node my-agent.js "Your task" --model ollama:mistral-small
+
+# Specify provider explicitly
+node my-agent.js "Your task" --provider openai
+node my-agent.js "Your task" --provider anthropic
+node my-agent.js "Your task" --provider gemini
+node my-agent.js "Your task" --provider ollama
+
+# Pass API keys directly (instead of using environment variables)
+node my-agent.js "Your task" --openai-key sk-...
+node my-agent.js "Your task" --anthropic-key sk-ant-...
+node my-agent.js "Your task" --gemini-key AIza...
+
+# Save API keys to .env file for future use
+node my-agent.js "Your task" --save-keys
+```
+</details>
+
+<details>
+<summary><b>🔧 Built-in Tools</b></summary>
+
+Every agent created from the stub includes these tools:
+
+```
+• list_files     - List files in workspace (path, pattern)
+• read_file      - Read text files (path, max_bytes=200KB)
+• write_file     - Write text files (path, content)
+• delete_file    - Delete workspace files (path)
+• fetch_url      - HTTP requests (url, method, headers, body, max_bytes=200KB)
+• search_web     - DuckDuckGo search (query, max_results)
+• scrape_page    - Extract text from web pages (url, max_bytes=200KB)
+• download_file  - Download files to workspace (url, path)
+• define_tool    - Create new tools at runtime (name, code)
+• help           - Get tool documentation (tool)
+```
+</details>
+
+<details>
+<summary><b>⚡ Dynamic Tool Creation</b></summary>
+
+Agents can create new tools on-the-fly:
+
+```javascript
+// The agent can define custom tools as needed:
+<<tool:define_tool {
+  "name": "analyze_json",
+  "code": "const {data} = args; return JSON.stringify(JSON.parse(data), null, 2);"
+}>>
+
+// Dynamic tools have access to a file helper (workspace-confined):
+<<tool:define_tool {
+  "name": "count_files",
+  "code": "const files = await file.list(args.path || '.'); return `Found ${files.length} items`;"
+}>>
 ```
 
-### Set Working Directory
+The file helper provides (automatically bound to workspace):
+- `file.write(path, content)` - Write files
+- `file.read(path, maxBytes)` - Read files
+- `file.list(path)` - List directory contents
+</details>
+
+<details>
+<summary><b>🔐 Environment Variables</b></summary>
+
 ```bash
-# Work with files in a specific directory
-node agent.js "Organize these files by type" --cwd ./my-documents --yolo
+# Ollama configuration
+OLLAMA_HOST=http://localhost:11434  # Default Ollama server
+
+# API Keys (loaded from .env file or environment)
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+GEMINI_API_KEY=AIza...
+
+# Custom API endpoints (for proxies or local deployments)
+OPENAI_BASE_URL=https://api.openai.com
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+ANTHROPIC_VERSION=2023-06-01
+
+# Debugging
+LOG_LEVEL=debug  # Options: debug, info, warn, error
 ```
+</details>
 
-### Create Custom Agents
+<details>
+<summary><b>🐛 Debugging</b></summary>
 
-1. Give the stub to your AI coding assistant (Claude Code, Codex, Cursor):
 ```bash
-# Copy the stub content or share the file with your AI
-```
+# Enable debug logging to see all model interactions
+LOG_LEVEL=debug node my-agent.js "Your task"
 
-2. Tell your AI what kind of agent you want:
-```
-"Using this agent.js file, create a research agent that can search the web and write reports"
-```
+# Preview what tools will be called without executing
+node my-agent.js "Your task"  # No --yolo flag
 
-3. AI creates your custom agent → Save it → Run it:
-```bash
-node my-research-agent.js "Research quantum computing breakthroughs" --yolo
+# See the help for any tool (agent will call it)
+node my-agent.js "Show me the help for the fetch_url tool" --yolo
 ```
+</details>
+
+<details>
+<summary><b>🛡️ Safety Features</b></summary>
+
+The agent stub includes built-in safety measures:
+
+```
+• Path Protection    - Files can only be accessed within the working directory
+• Output Truncation  - Large outputs are automatically truncated (4KB default)
+• Tool Timeouts      - Tools timeout after 30 seconds to prevent hanging
+• File Size Limits   - read_file defaults to 200KB max to prevent memory issues
+• Preview Mode       - Without --yolo, shows what would be executed
+• Sandbox for Dynamic Tools - Limited environment for runtime-created tools
+• Smart JSON Parser  - Handles common LLM mistakes (trailing commas, quotes, etc.)
+```
+</details>
 
 ## Requirements
 
-- Node.js 18+ 
+- Node.js 18+
 - Ollama (free local AI)
 
 ### Setting up Ollama
@@ -277,7 +384,7 @@ node my-research-agent.js "Research quantum computing breakthroughs" --yolo
 # 1. Install from https://ollama.ai
 
 # 2. Pull a model:
-ollama pull llama3.2
+ollama pull mistral-small
 
 # 3. Start Ollama:
 ollama serve
@@ -291,7 +398,7 @@ That's it! Now you can run agents locally for free.
 
 - **One file** that does real work
 - **No frameworks** to learn
-- **No dependencies** to manage  
+- **No npm dependencies** to manage
 - **No complexity** to debug
 - **Just results**
 
@@ -354,9 +461,13 @@ While your AI assistant handles most changes, you might want to make quick edits
 
 ## 📚 Learn More
 
-- **Claude Code Guide**: [Getting Started with Claude Code](https://docs.anthropic.com/en/docs/claude-code/quickstart)
-- **OpenAI Codex Guide**: [Getting Started with Codex CLI](https://help.openai.com/en/articles/11096431-openai-codex-cli-getting-started)
-- **Gemini CLI Guide**: [Getting Started with Gemini CLI](https://github.com/google-gemini/gemini-cli)
+These guides will help you get the most out of your AI coding assistant for building agents:
+
+- **Claude Code Guide**: [Getting Started with Claude Code](https://docs.anthropic.com/en/docs/claude-code/quickstart) - Learn about Claude's coding capabilities, command options, and best practices for agent creation
+- **OpenAI Codex Guide**: [Getting Started with Codex CLI](https://help.openai.com/en/articles/11096431-openai-codex-cli-getting-started) - Understand Codex's features, API integration, and how to optimize agent development
+- **Gemini CLI Guide**: [Getting Started with Gemini CLI](https://github.com/google-gemini/gemini-cli) - Explore Gemini's free tier, model selection, and agent building techniques
+
+Each assistant has its own strengths - explore their docs to find advanced features and tips for creating more powerful agents.
 
 ## Troubleshooting
 
@@ -377,8 +488,11 @@ MIT - Do whatever you want with it.
 **Remember**: The best code is code you don't have to write. Let the agent write it for you.
 
 ```bash
-# Your next command:
-node agent.js "Help me build something amazing" --yolo
+# Tell your AI assistant:
+"Create an agent that helps me build something amazing"
+
+# Then run your new agent:
+node amazing-builder.js "Design a web application architecture" --yolo
 ```
 
 ---

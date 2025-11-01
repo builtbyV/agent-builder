@@ -49,18 +49,19 @@ Now work with this new file. It provides:
 - Error handling
 - CLI interface
 - Universal scaffold + universal tool rules
-- Tool discovery helper (`help` and `tool_help`)
+- Tool discovery helper (`help`)
 
 ### Provider Selection Policy
 - Default: Ollama (local‑first, free, zero keys)
 - Explicit override: `--provider` or model prefixes `openai:`, `anthropic:`, `gemini:`, `ollama:`
-- Model-only inference: If model clearly implies a vendor (`gpt-*`, `claude-*`, `gemini-*`), route there; otherwise stick to Ollama
+- Model-only inference: If model clearly implies a vendor (`gpt-[345]`, `claude-*`, `gemini-*`), route there; otherwise stick to Ollama
 - API keys: CLI flags > env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) > `.env` in CWD
 - Interactive only: If still missing in an interactive TTY, prompts for the key (hidden). Optional `--save-keys` appends to local `.env`
 
 ### CLI Flags & Env
 - `--provider|-p openai|anthropic|gemini|ollama`
-- `--model|-m <model>` (prefix form also supported, e.g., `openai:gpt-4o-mini`)
+- `--model|-m <model>` (prefix form also supported, e.g., `openai:gpt-5-mini`)
+- `--max-turns <number>` (override default 5 turns)
 - `--openai-key`, `--anthropic-key`, `--gemini-key` (override env)
 - `--save-keys` (write prompted key to `.env` in the working directory)
 - Env vars: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OLLAMA_HOST`
@@ -425,21 +426,21 @@ node agent.js "Write a plan for the agent" --model ollama:gpt-oss --yolo
 ### OpenAI
 ```bash
 export OPENAI_API_KEY=sk-...
-node agent.js "Draft a product brief" --model openai:gpt-4o-mini --yolo
+node agent.js "Draft a product brief" --model openai:gpt-5-mini --yolo
 # Or prompt and save to .env
-node agent.js "Draft a product brief" --provider openai --model gpt-4o-mini --save-keys --yolo
+node agent.js "Draft a product brief" --provider openai --model gpt-5-mini --save-keys --yolo
 ```
 
 ### Anthropic
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-node agent.js "Create a lightweight research report" --model anthropic:claude-3-5-sonnet --yolo
+node agent.js "Create a lightweight research report" --model anthropic:claude-sonnet-4-5 --yolo
 ```
 
 ### Gemini
 ```bash
 export GEMINI_API_KEY=google-...
-node agent.js "Outline a blog about vector DBs" --model gemini:gemini-2.0-flash --yolo
+node agent.js "Outline a blog about vector DBs" --model gemini:gemini-2.5-flash --yolo
 ```
 
 ## How the Agent Chooses a Provider

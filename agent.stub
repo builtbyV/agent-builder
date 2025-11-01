@@ -29,7 +29,7 @@ function toolListInline() {
 
 function toolBullets() {
   return Object.keys(ToolRegistry)
-    .map(n => `- **${n}** — ${TOOL_DOCS[n] || 'See tool_help'}`)
+    .map(n => `- **${n}** — ${TOOL_DOCS[n] || 'See help'}`)
     .join('\n');
 }
 
@@ -162,12 +162,56 @@ function tryParseJSON(s) {
   // First try strict parsing
   try { return JSON.parse(s); } catch { }
 
-  // Light fixups for common LLM mistakes
-  const relaxed = s
-    .replace(/,\s*}/g, '}')      // Remove trailing commas in objects
-    .replace(/,\s*]/g, ']')       // Remove trailing commas in arrays
-    .replace(/'/g, '"')           // Replace single quotes with double quotes
-    .replace(/(\w+):/g, '"$1":'); // Add quotes to unquoted keys
+  // Process string character by character, tracking string state
+  let out = '';
+  let inStr = false, esc = false;
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+
+    if (inStr) {
+      // Inside a string - preserve everything except handle escapes
+      if (esc) {
+        esc = false;
+        out += ch;
+        continue;
+      }
+      if (ch === '\\') {
+        esc = true;
+        out += ch;
+        continue;
+      }
+      if (ch === '"') {
+        inStr = false;
+        out += ch;
+        continue;
+      }
+      out += ch;
+    } else {
+      // Outside strings - apply fixes
+      if (ch === '"') {
+        inStr = true;
+        out += ch;
+      } else if (ch === "'") {
+        // Replace single quotes with double quotes (for string delimiters)
+        out += '"';
+      } else if (ch === ',' && i + 1 < s.length) {
+        // Check if this comma is followed by } or ] (trailing comma)
+        let j = i + 1;
+        while (j < s.length && /\s/.test(s[j])) j++;
+        if (j < s.length && (s[j] === '}' || s[j] === ']')) {
+          // Skip trailing comma
+          continue;
+        }
+        out += ch;
+      } else {
+        out += ch;
+      }
+    }
+  }
+
+  // Quote unquoted keys at object boundaries only
+  let relaxed = out.replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":');
 
   try {
     return JSON.parse(relaxed);
@@ -180,13 +224,14 @@ function tryParseJSON(s) {
 // ======== TOOL REGISTRY ========
 // --- Tool docs used for quick help (optional but helpful) ---
 const TOOL_DOCS = {
+  help: 'Get tool documentation. args: {tool?}',
   list_files: 'List files in workspace. args: {path=".", pattern?}',
-  read_file: 'Read text file. args: {path, max_bytes?}',
+  read_file: 'Read text file. args: {path, max_bytes?=204800}',
   write_file: 'Write text file. args: {path, content}',
-  fetch_url: 'HTTP(S) fetch. args: {url, method?, headers?, body?, as?=text|json, max_bytes?}',
+  fetch_url: 'HTTP(S) fetch. args: {url, method?, headers?, body?, as?=text|json, max_bytes?=204800}',
   define_tool: 'Define a new tool at runtime. args: {name, code}',
-  search_web: 'DuckDuckGo HTML search. args: {query, max_results?, region?, safe?}',
-  scrape_page: 'Fetch & strip HTML to clean text. args: {url, max_bytes?}',
+  search_web: 'DuckDuckGo HTML search. args: {query, max_results?}',
+  scrape_page: 'Fetch & strip HTML to clean text. args: {url, max_bytes?=204800}',
   download_file: 'Download URL to workspace. args: {url, path}',
   delete_file: 'Delete a workspace file. args: {path}'
 };
@@ -335,12 +380,18 @@ const ToolRegistry = {
 
   // META-TOOL: Define new tools at runtime
   // This allows the AI to create tools it needs on the fly
+  // WARNING: Dynamic tools have limited file access through the 'file' helper
+  // which enforces workspace confinement. File operations are bound to ctx.cwd.
+  // Usage in dynamic tools:
+  //   await file.write('output.txt', 'content')
+  //   const data = await file.read('input.txt', 1000)
+  //   const files = await file.list('subdir')
   async define_tool(args, ctx) {
     const { name, code } = args || {};
     const toolName = assertString(name, 'name');
     assertString(code, 'code');
     if (!/^[a-zA-Z0-9_]{1,32}$/.test(toolName)) {
-      throw new AppError('Tool name must be alphanumeric with underscores, max 32 chars');
+      throw new AppError('Tool name must be alphanumeric with underscores, max 32 chars', 'VALIDATION');
     }
 
     // Wrap user's code as an async function that receives (args, ctx)
@@ -352,18 +403,44 @@ const ToolRegistry = {
     let compiled;
     try {
       const script = new vm.Script(wrappedSrc, { filename: `tool:${toolName}`, displayErrors: true });
+      // Create sandbox with minimal file helper for opt-in file access
       const sandbox = vm.createContext({
         console, fetch, setTimeout, clearTimeout, URL, Buffer,
-        AppError, assertString, truncate  // allow helpers
+        AppError, assertString, truncate,  // allow helpers
+        // file helper is injected per execution and always bound to toolCtx.cwd
+        file: {} // will be (re)assigned with a baseDir-bound helper per invocation
       });
       compiled = script.runInContext(sandbox);
       if (typeof compiled !== 'function') throw new Error('Tool did not export a function');
     } catch (e) {
-      throw new AppError(`Failed to compile tool '${toolName}': ${e.message}`);
+      throw new AppError(`Failed to compile tool '${toolName}': ${e.message}`, 'COMPILE_ERROR');
     }
+
+    // Create a baseDir-bound file helper for each invocation
+    const makeFileHelper = (baseDir) => Object.freeze({
+      async write(relPath, contents) {
+        const full = safePath(baseDir, relPath);
+        fs.mkdirSync(path.dirname(full), { recursive: true });
+        fs.writeFileSync(full, contents, 'utf8');
+        return `OK:${relPath}`;
+      },
+      async read(relPath, maxBytes) {
+        const full = safePath(baseDir, relPath);
+        let data = fs.readFileSync(full, 'utf8');
+        if (typeof maxBytes === 'number') data = data.slice(0, maxBytes);
+        return data;
+      },
+      async list(relPath = '.') {
+        const dir = safePath(baseDir, relPath);
+        return fs.readdirSync(dir, { withFileTypes: true })
+          .map(d => (d.isDirectory() ? d.name + '/' : d.name));
+      }
+    });
 
     ToolRegistry[toolName] = async (toolArgs, toolCtx) => {
       try {
+        // Rebind a safe file helper for this run
+        sandbox.file = makeFileHelper(toolCtx.cwd);
         const out = await compiled(toolArgs, toolCtx);
         return truncate(out);
       } catch (e) {
@@ -388,11 +465,14 @@ const ToolRegistry = {
   },
 
   async read_file(args, ctx) {
-    const { path: p, max_bytes } = args || {};
+    const { path: p, max_bytes = 204800 } = args || {}; // Default 200KB limit
     assertString(p, 'path');
     const full = safePath(ctx.cwd, p);
     let data = fs.readFileSync(full, 'utf8');
-    if (typeof max_bytes === 'number') data = data.slice(0, max_bytes);
+    // Apply max_bytes limit (default or specified)
+    if (typeof max_bytes === 'number' && max_bytes > 0) {
+      data = data.slice(0, max_bytes);
+    }
     return truncate(data);
   },
 
@@ -407,7 +487,7 @@ const ToolRegistry = {
 
   // --- Minimal web tool ---
   async fetch_url(args, ctx) {
-    const { url, method = 'GET', headers = {}, body, max_bytes, as = 'text' } = args || {};
+    const { url, method = 'GET', headers = {}, body, max_bytes = 204800, as = 'text' } = args || {};
     assertString(url, 'url');
     const res = await fetch(url, {
       method,
@@ -420,7 +500,10 @@ const ToolRegistry = {
     if (as === 'json') {
       try { out = JSON.stringify(JSON.parse(raw), null, 2); } catch { }
     }
-    if (typeof max_bytes === 'number') out = out.slice(0, max_bytes);
+    // Apply max_bytes limit (default 200KB)
+    if (typeof max_bytes === 'number' && max_bytes > 0) {
+      out = out.slice(0, max_bytes);
+    }
     return truncate(`Status: ${res.status}\n${out}`);
   },
 
@@ -452,7 +535,7 @@ const ToolRegistry = {
 
   // Minimal page scraper that fetches and strips HTML to text
   async scrape_page(args, ctx) {
-    const { url, max_bytes = 20000 } = args || {};
+    const { url, max_bytes = 204800 } = args || {};  // Default 200KB like other tools
     assertString(url, 'url');
     const res = await fetch(url, { signal: ctx.signal, headers: { 'User-Agent': 'agent-builder/1.0' } });
     const html = await res.text();
@@ -476,7 +559,7 @@ const ToolRegistry = {
     if (!res.ok) throw new AppError(`download_file failed: HTTP ${res.status}`, 'TOOL_ERROR');
     const ab = await res.arrayBuffer();
     const buf = Buffer.from(ab);
-    fs.mkdirSync(require('path').dirname(full), { recursive: true });
+    fs.mkdirSync(path.dirname(full), { recursive: true });
     fs.writeFileSync(full, buf);
     return `Saved ${buf.length} bytes to ${p}`;
   },
@@ -493,13 +576,6 @@ const ToolRegistry = {
       if (e.code === 'ENOENT') return `No-op: ${p} not found`;
       throw new AppError(`delete_file failed: ${e.message}`, 'TOOL_ERROR');
     }
-  },
-
-  // Tool docs listing helper
-  async tool_help(args, ctx) {
-    const names = Object.keys(ToolRegistry);
-    const lines = names.map(n => `- ${n}: ${TOOL_DOCS[n] || 'No description available'}`);
-    return lines.join('\n');
   },
 
   // TODO: ADD YOUR TOOLS HERE
@@ -585,6 +661,12 @@ Remember:
 - Before any tool calls, rewrite the bracketed scaffold with concrete values.
 - If you must assume something, state the assumption briefly and continue.
 - If you’re unsure about a tool’s parameters, call the helper: <<tool:help {"tool":"TOOL_NAME"}>>
+
+First‑Turn Protocol (MUST DO):
+1. Agent Setup — Overwrite the scaffold with concrete values.
+2. Plan — Provide a short bullet plan listing actions and tools.
+3. Execute — Call tools using strict JSON payloads.
+4. Deliver — Save artifacts to declared paths and list file paths.
 `;
 
 // Combine them (single, final system message)
@@ -615,7 +697,7 @@ class OllamaProvider {
 }
 
 class OpenAIProvider {
-  constructor({ model = 'gpt-4o-mini', apiKey, baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com' }) {
+  constructor({ model = 'gpt-5-mini', apiKey, baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com' }) {
     this.model = model;
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.replace(/\/$/, '');
@@ -645,7 +727,7 @@ class OpenAIProvider {
 
 class AnthropicProvider {
   constructor({
-    model = 'claude-3-5-sonnet-latest',
+    model = 'claude-sonnet-4-5-20250929',
     apiKey,
     version = process.env.ANTHROPIC_VERSION || '2023-06-01',
     baseUrl = process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com'
@@ -690,7 +772,7 @@ class AnthropicProvider {
 }
 
 class GeminiProvider {
-  constructor({ model = 'gemini-2.0-flash', apiKey, baseUrl = 'https://generativelanguage.googleapis.com' }) {
+  constructor({ model = 'gemini-2.5-flash', apiKey, baseUrl = 'https://generativelanguage.googleapis.com' }) {
     this.model = model;
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.replace(/\/$/, '');
@@ -742,10 +824,12 @@ function splitPrefixedModel(spec) {
 function inferProviderFromModel(model) {
   const s = (model || '').toLowerCase();
   if (!s) return '';
-  // Only infer OpenAI for known OpenAI model families; avoid mapping gpt-oss, etc.
-  if (/^(gpt-4|gpt-4o|gpt-4\.1|gpt-3\.5|o3|o4)/.test(s) || s.startsWith('gpt-4o-mini')) return 'openai';
+  // OpenAI models: gpt-5 family, gpt-4 family, gpt-3.5, o-series
+  if (/^(gpt-[345]|o[1-9])/.test(s)) return 'openai';
+  // Anthropic models: claude or specific model names
   if (s.startsWith('claude') || s.includes('sonnet') || s.includes('haiku') || s.includes('opus')) return 'anthropic';
-  if (s.startsWith('gemini') || s.includes('1.5') || s.includes('2.0') || s.includes('flash')) return 'gemini';
+  // Gemini models: gemini prefix or version patterns like 2.0, 2.5
+  if (s.startsWith('gemini') || s.includes('flash') || s.includes('pro') || /gemini.*\d\.\d/.test(s)) return 'gemini';
   return '';
 }
 
@@ -758,9 +842,9 @@ async function createProvider({ modelSpec, providerHint = '', keys = {}, cwd = p
   if (!provider) provider = inferProviderFromModel(model) || 'ollama';
   if (!model) {
     if (provider === 'ollama') model = 'mistral-small';
-    if (provider === 'openai') model = 'gpt-4o-mini';
-    if (provider === 'anthropic') model = 'claude-3-5-sonnet-latest';
-    if (provider === 'gemini') model = 'gemini-2.0-flash';
+    if (provider === 'openai') model = 'gpt-5-mini';  // Updated to latest
+    if (provider === 'anthropic') model = 'claude-sonnet-4-5-20250929';  // Updated to 4.5
+    if (provider === 'gemini') model = 'gemini-2.5-flash';  // Updated to 2.5
   }
 
   switch (provider) {
@@ -868,7 +952,8 @@ async function executeTools(calls, ctx) {
     } catch (e) {
       results.push({
         name: call.name,
-        error: e.message || 'Tool execution failed'
+        error: e.message || 'Tool execution failed',
+        args: call.args
       });
     } finally {
       clearTimeout(timeout);
@@ -925,7 +1010,7 @@ async function runAgent({ task, model, provider: providerHint, openaiKey, anthro
       const results = await executeTools(toolCalls, { cwd });
       const toolOutput = results.map(r =>
         r.error
-          ? `> ${r.name}: ERROR: ${r.error}`
+          ? `> ${r.name} ARGS=${JSON.stringify(r.args)}: ERROR: ${r.error}`
           : `> ${r.name}: ${r.output}`
       ).join('\n');
 
@@ -955,7 +1040,8 @@ async function runAgent({ task, model, provider: providerHint, openaiKey, anthro
 function parseArgs(argv) {
   const args = {
     task: '', model: '', provider: '', yolo: false, cwd: process.cwd(),
-    openaiKey: '', anthropicKey: '', geminiKey: '', saveKeys: false
+    openaiKey: '', anthropicKey: '', geminiKey: '', saveKeys: false,
+    maxTurns: 0
   };
   const positional = [];
 
@@ -965,6 +1051,7 @@ function parseArgs(argv) {
     else if (arg === '--provider' || arg === '-p') { args.provider = argv[++i]; }
     else if (arg === '--cwd') { args.cwd = argv[++i]; }
     else if (arg === '--yolo' || arg === '-y') { args.yolo = true; }
+    else if (arg === '--max-turns') { args.maxTurns = parseInt(argv[++i] || '5', 10); }
     else if (arg === '--openai-key') { args.openaiKey = argv[++i]; }
     else if (arg === '--anthropic-key') { args.anthropicKey = argv[++i]; }
     else if (arg === '--gemini-key') { args.geminiKey = argv[++i]; }
@@ -992,9 +1079,10 @@ Usage:
   node agent.js "Your task" --yolo                    # Auto-execute tools
   node agent.js "Your task" --model deepseek-r1       # Choose Ollama model
   node agent.js "Your task" --cwd ./workspace         # Set working dir
-  node agent.js "Your task" --provider openai -m gpt-4o-mini  # Use OpenAI
-  node agent.js "Your task" --provider anthropic -m claude-3-5-sonnet
-  node agent.js "Your task" --provider gemini -m gemini-2.0-flash
+  node agent.js "Your task" --max-turns 10            # Override max turns (default: 5)
+  node agent.js "Your task" --provider openai -m gpt-5-mini  # Use OpenAI
+  node agent.js "Your task" --provider anthropic -m claude-sonnet-4-5
+  node agent.js "Your task" --provider gemini -m gemini-2.5-flash
 
 Examples:
   node agent.js "Write a hello world program"
@@ -1003,10 +1091,10 @@ Examples:
 
 Models:
   Default: mistral-small (via Ollama)
-  Ollama: mistral-small, gpt-oss, llama3.2, deepseek-r1, qwen2.5, magistral, etc.
-  OpenAI: gpt-4o-mini, gpt-4.1, etc. (requires OPENAI_API_KEY)
-  Anthropic: claude-3-5-sonnet, haiku, opus (requires ANTHROPIC_API_KEY)
-  Gemini: gemini-2.0-flash, 1.5-flash (requires GEMINI_API_KEY)
+  Ollama: mistral-small, mixtral, llama3.2, deepseek-r1, qwen2.5, codellama, etc.
+  OpenAI: gpt-5, gpt-5-mini, gpt-5-nano, gpt-4.1 (requires OPENAI_API_KEY)
+  Anthropic: claude-sonnet-4-5, claude-haiku-4-5, claude-opus-4-1 (requires ANTHROPIC_API_KEY)
+  Gemini: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash (requires GEMINI_API_KEY)
 
 TO CREATE YOUR AGENT:
 1. Copy this file
@@ -1018,6 +1106,12 @@ TO CREATE YOUR AGENT:
     }
 
     logger.info(`Starting agent with task: ${args.task}`);
+
+    // Apply maxTurns override if provided
+    if (args.maxTurns) {
+      CONFIG.maxTurns = Math.max(1, args.maxTurns);
+      logger.debug(`Overriding maxTurns to ${CONFIG.maxTurns}`);
+    }
 
     const result = await runAgent(args);
 
