@@ -12,7 +12,7 @@
 //
 // Environment Variables:
 //   OLLAMA_HOST      - Default: http://localhost:11434
-//   (no cloud API keys needed)  // Ollama only
+//   Default: Ollama (local, no keys). Cloud providers available via --provider flag.
 
 // ======== CONFIGURATION ========
 const CONFIG = {
@@ -20,6 +20,14 @@ const CONFIG = {
   maxTurns: 5,
   toolTimeoutMs: 30_000,
   maxToolOutputChars: 4096, // Prevent context explosion from large outputs
+  maxLLMOutputTokens: 4096, // Max tokens for LLM responses (applies to providers that require it)
+  maxDownloadBytes: 50 * 1024 * 1024, // 50MB limit for download_file
+  maxSpawnDepth: 3, // Max nesting depth for spawn_agent (prevent infinite recursion)
+  spawnMaxTurns: 3, // Default turn limit for spawned subagents (keep them focused)
+  // Default task — AI should set this when the agent has a specific purpose.
+  // If set, users can run `node agent.js --yolo` without a task argument.
+  // Users can still override: `node agent.js "custom task" --yolo`
+  defaultTask: '',
 };
 
 // Small helpers to render tool lists for instructions
@@ -38,6 +46,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const readline = require('readline');
+const { execFileSync } = require('child_process');
 
 const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
 const level = LOG_LEVELS[CONFIG.logLevel] ?? LOG_LEVELS.info;
@@ -148,12 +157,49 @@ function safePath(baseDir, targetPath) {
 }
 
 // Truncate long outputs to avoid context explosion
-function truncate(text, maxChars = CONFIG.maxToolOutputChars) {
+// hint: optional suggestion shown to the model when output is truncated
+function truncate(text, maxChars = CONFIG.maxToolOutputChars, hint = '') {
   const str = String(text || '');
   if (str.length > maxChars) {
-    return str.slice(0, maxChars) + `\n...[truncated ${str.length - maxChars} chars]`;
+    const suffix = hint
+      ? `\n...[truncated ${str.length - maxChars} chars. ${hint}]`
+      : `\n...[truncated ${str.length - maxChars} chars]`;
+    return str.slice(0, maxChars) + suffix;
   }
   return str;
+}
+
+// Simple YAML frontmatter parser (no deps)
+// Returns { meta: { key: value, ... }, body: "content after frontmatter" }
+function parseFrontmatter(text) {
+  const str = String(text || '');
+  const match = str.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) return { meta: {}, body: str };
+  const meta = {};
+  for (const line of match[1].split(/\r?\n/)) {
+    const m = line.match(/^(\w[\w-]*)\s*:\s*(.*)$/);
+    if (!m) continue;
+    let val = m[2].trim();
+    // Parse arrays: [a, b, c]
+    if (val.startsWith('[') && val.endsWith(']')) {
+      val = val.slice(1, -1).split(',').map(s => s.trim()).filter(Boolean);
+    } else if (val === 'true') val = true;
+    else if (val === 'false') val = false;
+    else if (/^\d+$/.test(val)) val = Number(val);
+    meta[m[1]] = val;
+  }
+  return { meta, body: match[2] };
+}
+
+// Convert title to kebab-case filename slug
+function toSlug(title) {
+  return String(title || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/[\s_]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80) || 'untitled';
 }
 
 // Tolerant JSON parser for LLM-generated output
@@ -226,15 +272,45 @@ function tryParseJSON(s) {
 const TOOL_DOCS = {
   help: 'Get tool documentation. args: {tool?}',
   list_files: 'List files in workspace. args: {path=".", pattern?}',
-  read_file: 'Read text file. args: {path, max_bytes?=204800}',
+  read_file: 'Read text file. args: {path, max_bytes?=4096}',
   write_file: 'Write text file. args: {path, content}',
-  fetch_url: 'HTTP(S) fetch. args: {url, method?, headers?, body?, as?=text|json, max_bytes?=204800}',
+  fetch_url: 'HTTP(S) fetch. args: {url, method?, headers?, body?, as?=text|json, max_bytes?=4096}',
   define_tool: 'Define a new tool at runtime. args: {name, code}',
   search_web: 'DuckDuckGo HTML search. args: {query, max_results?}',
-  scrape_page: 'Fetch & strip HTML to clean text. args: {url, max_bytes?=204800}',
+  scrape_page: 'Fetch & strip HTML to clean text. args: {url, max_bytes?=4096}',
   download_file: 'Download URL to workspace. args: {url, path}',
-  delete_file: 'Delete a workspace file. args: {path}'
+  delete_file: 'Delete a workspace file. args: {path}',
+  ingest_source: 'Ingest content into knowledge base. args: {title, content, source?="user", tags?=[], type?="article"}',
+  read_manifest: 'Read knowledge base manifest. args: {filter?="all"} (filter: "all"|"uncompiled"|"compiled")',
+  mark_compiled: 'Mark a raw source as compiled. args: {file}',
+  search_context: 'Search knowledge base files by content. args: {query, path?="context", max_results?=10} — uses rg/grep when available',
+  save_learning: 'Save an operational learning. args: {content, category?="discovery"}',
+  read_section: 'Read a markdown file by heading. args: {path, heading?} — omit heading to list all headings',
+  finish_task: 'Declare the task complete and return a final summary. args: {summary, files_created?}',
+  spawn_agent: 'Spawn a focused subagent with its own context. args: {task, instruction?, max_turns?=3} — use for subtasks that would fill context (research, analysis, code generation)'
 };
+
+// Error recovery hints keyed by common error codes.
+// Gives the model actionable next steps instead of raw errors.
+const RECOVERY_HINTS = {
+  ENOENT: 'File not found. Use list_files to check what exists.',
+  EACCES: 'Permission denied. Check file permissions or try a different path.',
+  ECONNREFUSED: 'Connection refused. Is the target service running?',
+  ETIMEDOUT: 'Connection timed out. Try again or use a different URL.',
+  SECURITY: 'Path is outside the workspace. Use relative paths within --cwd.',
+  VALIDATION: 'Missing or invalid argument. Check the tool signature with help.',
+  TOOL_ERROR: '',
+  ABORTED: 'Tool timed out. Simplify the request or try a smaller input.',
+};
+
+function formatError(toolName, error) {
+  const code = error.code || '';
+  const hint = RECOVERY_HINTS[code] || '';
+  const msg = error.message || 'Tool execution failed';
+  return hint
+    ? `[FAIL] ${toolName}: ${msg}\n  Hint: ${hint}`
+    : `[FAIL] ${toolName}: ${msg}`;
+}
 /*
 AI INSTRUCTIONS FOR IMPLEMENTING TOOLS:
 
@@ -374,7 +450,7 @@ const ToolRegistry = {
     } catch (error) {
       // Step 5: Handle errors with helpful messages
       if (error instanceof AppError) throw error;
-      throw new AppError(`Failed to execute example_tool: ${error.message}`, 'TOOL_ERROR');
+      throw new AppError(`Tool failed: ${error.message}`, 'TOOL_ERROR');
     }
   },
 
@@ -465,15 +541,19 @@ const ToolRegistry = {
   },
 
   async read_file(args, ctx) {
-    const { path: p, max_bytes = 204800 } = args || {}; // Default 200KB limit
+    const { path: p, max_bytes } = args || {};
     assertString(p, 'path');
     const full = safePath(ctx.cwd, p);
     let data = fs.readFileSync(full, 'utf8');
-    // Apply max_bytes limit (default or specified)
-    if (typeof max_bytes === 'number' && max_bytes > 0) {
-      data = data.slice(0, max_bytes);
+    // Apply explicit max_bytes if provided (overrides default truncation)
+    const limit = (typeof max_bytes === 'number' && max_bytes > 0)
+      ? max_bytes
+      : CONFIG.maxToolOutputChars;
+    if (data.length > limit) {
+      const hint = `Pass max_bytes to read more, or use read_section to navigate by heading`;
+      data = data.slice(0, limit) + `\n...[truncated ${data.length - limit} chars. ${hint}]`;
     }
-    return truncate(data);
+    return data;
   },
 
   async write_file(args, ctx) {
@@ -487,7 +567,7 @@ const ToolRegistry = {
 
   // --- Minimal web tool ---
   async fetch_url(args, ctx) {
-    const { url, method = 'GET', headers = {}, body, max_bytes = 204800, as = 'text' } = args || {};
+    const { url, method = 'GET', headers = {}, body, max_bytes, as = 'text' } = args || {};
     assertString(url, 'url');
     const res = await fetch(url, {
       method,
@@ -500,11 +580,14 @@ const ToolRegistry = {
     if (as === 'json') {
       try { out = JSON.stringify(JSON.parse(raw), null, 2); } catch { }
     }
-    // Apply max_bytes limit (default 200KB)
-    if (typeof max_bytes === 'number' && max_bytes > 0) {
-      out = out.slice(0, max_bytes);
+    const limit = (typeof max_bytes === 'number' && max_bytes > 0)
+      ? max_bytes
+      : CONFIG.maxToolOutputChars;
+    const prefix = `Status: ${res.status}\n`;
+    if (out.length + prefix.length > limit) {
+      out = out.slice(0, limit - prefix.length) + `\n...[truncated. Pass max_bytes for larger response]`;
     }
-    return truncate(`Status: ${res.status}\n${out}`);
+    return prefix + out;
   },
 
   // Basic web search via DuckDuckGo HTML (no API key)
@@ -514,6 +597,7 @@ const ToolRegistry = {
     const q = encodeURIComponent(query);
     const url = `https://duckduckgo.com/html/?q=${q}`;
     const res = await fetch(url, { signal: ctx.signal, headers: { 'User-Agent': 'agent-builder/1.0' } });
+    if (!res.ok) throw new AppError(`search_web failed: HTTP ${res.status}`, 'TOOL_ERROR');
     const html = await res.text();
     const items = [];
     const re = /<a[^>]+class=\"[^\"]*result__a[^\"]*\"[^>]+href=\"([^\"]+)\"[^>]*>(.*?)<\/a>/g;
@@ -535,18 +619,23 @@ const ToolRegistry = {
 
   // Minimal page scraper that fetches and strips HTML to text
   async scrape_page(args, ctx) {
-    const { url, max_bytes = 204800 } = args || {};  // Default 200KB like other tools
+    const { url, max_bytes } = args || {};
     assertString(url, 'url');
     const res = await fetch(url, { signal: ctx.signal, headers: { 'User-Agent': 'agent-builder/1.0' } });
     const html = await res.text();
+    const limit = (typeof max_bytes === 'number' && max_bytes > 0)
+      ? max_bytes
+      : CONFIG.maxToolOutputChars;
     const cleaned = html
       .replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
       .replace(/<[^>]+>/g, ' ')
       .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, max_bytes);
-    return truncate(cleaned);
+      .trim();
+    if (cleaned.length > limit) {
+      return cleaned.slice(0, limit) + `\n...[truncated ${cleaned.length - limit} chars. Pass max_bytes for more content]`;
+    }
+    return cleaned;
   },
 
   // Download a URL to a safe path within the workspace
@@ -557,8 +646,15 @@ const ToolRegistry = {
     const full = safePath(ctx.cwd, p);
     const res = await fetch(url, { signal: ctx.signal, headers: { 'User-Agent': 'agent-builder/1.0' } });
     if (!res.ok) throw new AppError(`download_file failed: HTTP ${res.status}`, 'TOOL_ERROR');
+    const contentLength = parseInt(res.headers.get('content-length') || '0', 10);
+    if (contentLength > CONFIG.maxDownloadBytes) {
+      throw new AppError(`download_file: file too large (${contentLength} bytes, max ${CONFIG.maxDownloadBytes})`, 'TOOL_ERROR');
+    }
     const ab = await res.arrayBuffer();
     const buf = Buffer.from(ab);
+    if (buf.length > CONFIG.maxDownloadBytes) {
+      throw new AppError(`download_file: file too large (${buf.length} bytes, max ${CONFIG.maxDownloadBytes})`, 'TOOL_ERROR');
+    }
     fs.mkdirSync(path.dirname(full), { recursive: true });
     fs.writeFileSync(full, buf);
     return `Saved ${buf.length} bytes to ${p}`;
@@ -578,41 +674,380 @@ const ToolRegistry = {
     }
   },
 
+  // --- Knowledge base tools ---
+  // Compounding wiki pattern: ingest raw sources → compile into wiki → route via index
+  // See AGENTS.md "Knowledge Agent Pattern" for the full workflow.
+
+  async ingest_source(args, ctx) {
+    const { title, content, source = 'user', tags = [], type = 'article' } = args || {};
+    assertString(title, 'title');
+    assertString(content, 'content');
+    try {
+      const slug = toSlug(title);
+      const rawDir = safePath(ctx.cwd, 'context/raw');
+      fs.mkdirSync(rawDir, { recursive: true });
+      const tagList = Array.isArray(tags) ? tags : [tags];
+      const now = new Date().toISOString().slice(0, 10);
+
+      // Auto-split large content into parts (threshold: 8KB)
+      const SPLIT_THRESHOLD = 8192;
+      const chunks = [];
+      if (content.length <= SPLIT_THRESHOLD) {
+        chunks.push({ suffix: '', body: content });
+      } else {
+        // Split on heading boundaries (## or #), fall back to even splits
+        const parts = content.split(/(?=^#{1,2}\s)/m).filter(p => p.trim());
+        if (parts.length > 1) {
+          parts.forEach((p, i) => chunks.push({ suffix: `-part-${i + 1}`, body: p.trim() }));
+        } else {
+          // No headings — split by character count
+          for (let i = 0; i < content.length; i += SPLIT_THRESHOLD) {
+            const partNum = Math.floor(i / SPLIT_THRESHOLD) + 1;
+            chunks.push({ suffix: `-part-${partNum}`, body: content.slice(i, i + SPLIT_THRESHOLD) });
+          }
+        }
+      }
+
+      const manifestPath = safePath(ctx.cwd, 'context/raw/.manifest.json');
+      let manifest = [];
+      try {
+        manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        if (!Array.isArray(manifest)) manifest = [];
+      } catch { /* file doesn't exist yet — start fresh */ }
+
+      const files = [];
+      for (const chunk of chunks) {
+        const filename = `${slug}${chunk.suffix}.md`;
+        const filePath = safePath(ctx.cwd, `context/raw/${filename}`);
+        const partTitle = chunks.length > 1 ? `${title}${chunk.suffix}` : title;
+        const frontmatter = [
+          '---',
+          `title: ${partTitle}`,
+          `source: ${source}`,
+          `ingested: ${now}`,
+          `tags: [${tagList.join(', ')}]`,
+          `type: ${type}`,
+          `compiled: false`,
+          chunks.length > 1 ? `parts: ${chunks.length}` : null,
+          chunks.length > 1 ? `group: ${slug}` : null,
+          '---',
+        ].filter(Boolean).join('\n');
+        fs.writeFileSync(filePath, `${frontmatter}\n\n${chunk.body}`, 'utf8');
+        manifest.push({ file: filename, title: partTitle, source, ingested: now, compiled: false,
+          ...(chunks.length > 1 ? { group: slug, parts: chunks.length } : {}) });
+        files.push(filename);
+      }
+
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+
+      if (files.length === 1) {
+        return truncate(`Ingested "${title}" → context/raw/${files[0]}`);
+      }
+      return truncate(`Ingested "${title}" → split into ${files.length} parts:\n${files.map(f => `  context/raw/${f}`).join('\n')}`);
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(`ingest_source failed: ${error.message}`, 'TOOL_ERROR');
+    }
+  },
+
+  async read_manifest(args, ctx) {
+    const { filter = 'all' } = args || {};
+    try {
+      const manifestPath = safePath(ctx.cwd, 'context/raw/.manifest.json');
+      let manifest = [];
+      try {
+        manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        if (!Array.isArray(manifest)) manifest = [];
+      } catch { /* no manifest yet */ }
+
+      if (filter === 'uncompiled') {
+        manifest = manifest.filter(e => !e.compiled);
+      } else if (filter === 'compiled') {
+        manifest = manifest.filter(e => e.compiled);
+      }
+
+      if (manifest.length === 0) return 'No entries' + (filter !== 'all' ? ` matching filter "${filter}"` : '') + '.';
+      return truncate(JSON.stringify(manifest, null, 2));
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(`read_manifest failed: ${error.message}`, 'TOOL_ERROR');
+    }
+  },
+
+  async mark_compiled(args, ctx) {
+    const { file } = args || {};
+    assertString(file, 'file');
+    try {
+      const manifestPath = safePath(ctx.cwd, 'context/raw/.manifest.json');
+      let manifest;
+      try {
+        manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        if (!Array.isArray(manifest)) throw new Error('not an array');
+      } catch {
+        throw new AppError('Manifest not found or invalid — ingest sources first', 'TOOL_ERROR');
+      }
+
+      const entry = manifest.find(e => e.file === file);
+      if (!entry) throw new AppError(`File "${file}" not found in manifest`, 'TOOL_ERROR');
+      entry.compiled = true;
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+
+      // Keep raw file frontmatter in sync
+      const rawPath = safePath(ctx.cwd, `context/raw/${file}`);
+      try {
+        const raw = fs.readFileSync(rawPath, 'utf8');
+        const updated = raw.replace(/^compiled:\s*false$/m, 'compiled: true');
+        fs.writeFileSync(rawPath, updated, 'utf8');
+      } catch { /* raw file may have been moved — manifest is authoritative */ }
+
+      return truncate(`Marked "${file}" as compiled`);
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(`mark_compiled failed: ${error.message}`, 'TOOL_ERROR');
+    }
+  },
+
+  async search_context(args, ctx) {
+    const { query, path: searchPath = 'context', max_results = 10 } = args || {};
+    assertString(query, 'query');
+    try {
+      const baseDir = safePath(ctx.cwd, searchPath);
+      const cap = Math.max(1, Math.min(30, max_results));
+
+      // Try rg (ripgrep) first, then grep, then JS fallback
+      // Uses execFileSync — no shell, no injection risk
+      function trySystemSearch() {
+        const cmds = [
+          { bin: 'rg', args: ['-in', '--no-heading', '--line-number', '-g', '*.md', '--max-count', '3', query, baseDir] },
+          { bin: 'grep', args: ['-rin', '--include=*.md', '-m', '3', query, baseDir] },
+        ];
+        for (const cmd of cmds) {
+          try {
+            const out = execFileSync(cmd.bin, cmd.args, { timeout: 5000, maxBuffer: 1024 * 256 }).toString();
+            return out;
+          } catch (e) {
+            // Exit code 1 = no matches (not an error), anything else = binary not found or real error
+            if (e.status === 1) return '';
+            continue;
+          }
+        }
+        return null; // neither available
+      }
+
+      const sysResult = trySystemSearch();
+      if (sysResult !== null) {
+        // Parse grep/rg output: filepath:linenum:content
+        if (!sysResult.trim()) return `No matches for "${query}" in ${searchPath}/`;
+        const lines = sysResult.trim().split('\n').slice(0, cap * 3);
+        const byFile = new Map();
+        for (const line of lines) {
+          const m = line.match(/^(.+?):(\d+):(.*)$/);
+          if (!m) continue;
+          const rel = path.relative(ctx.cwd, m[1]);
+          if (!byFile.has(rel)) byFile.set(rel, []);
+          if (byFile.get(rel).length < 3) {
+            byFile.get(rel).push({ line: Number(m[2]), text: m[3].trim() });
+          }
+        }
+        const results = [];
+        for (const [file, matches] of byFile) {
+          if (results.length >= cap) break;
+          // Try to get title from frontmatter
+          let title = path.basename(file, '.md');
+          try {
+            const head = fs.readFileSync(safePath(ctx.cwd, file), 'utf8').slice(0, 500);
+            const { meta } = parseFrontmatter(head);
+            if (meta.title) title = meta.title;
+          } catch { /* skip */ }
+          results.push({ file, title, matches });
+        }
+        if (results.length === 0) return `No matches for "${query}" in ${searchPath}/`;
+        return truncate(JSON.stringify(results, null, 2));
+      }
+
+      // JS fallback — no rg or grep available
+      const results = [];
+      const queryLower = query.toLowerCase();
+      function walk(dir) {
+        let entries;
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const entry of entries) {
+          if (results.length >= cap) return;
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            if (!entry.name.startsWith('.')) walk(full);
+          } else if (entry.name.endsWith('.md')) {
+            try {
+              const content = fs.readFileSync(full, 'utf8');
+              if (content.toLowerCase().includes(queryLower)) {
+                const { meta } = parseFrontmatter(content);
+                const rel = path.relative(ctx.cwd, full);
+                const idx = content.toLowerCase().indexOf(queryLower);
+                const start = Math.max(0, idx - 40);
+                const end = Math.min(content.length, idx + query.length + 60);
+                const snippet = (start > 0 ? '...' : '') +
+                  content.slice(start, end).replace(/\n/g, ' ').trim() +
+                  (end < content.length ? '...' : '');
+                results.push({ file: rel, title: meta.title || entry.name, snippet });
+              }
+            } catch { /* unreadable file — skip */ }
+          }
+        }
+      }
+      walk(baseDir);
+      if (results.length === 0) return `No matches for "${query}" in ${searchPath}/`;
+      return truncate(JSON.stringify(results, null, 2));
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(`search_context failed: ${error.message}`, 'TOOL_ERROR');
+    }
+  },
+
+  async save_learning(args, ctx) {
+    const { content, category = 'discovery' } = args || {};
+    assertString(content, 'content');
+    const validCategories = ['retrieval', 'pattern', 'correction', 'discovery'];
+    const cat = validCategories.includes(category) ? category : 'discovery';
+    try {
+      const learningsPath = safePath(ctx.cwd, 'context/learnings.md');
+      fs.mkdirSync(path.dirname(learningsPath), { recursive: true });
+      const now = new Date().toISOString().slice(0, 10);
+      const entry = `\n## [${cat}] — ${now}\n\n${content}\n\n---\n`;
+      if (!fs.existsSync(learningsPath)) {
+        fs.writeFileSync(learningsPath, `# Operational Learnings\n${entry}`, 'utf8');
+      } else {
+        fs.appendFileSync(learningsPath, entry, 'utf8');
+      }
+      return truncate(`Saved ${cat} learning to context/learnings.md`);
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(`save_learning failed: ${error.message}`, 'TOOL_ERROR');
+    }
+  },
+
+  async read_section(args, ctx) {
+    const { path: p, heading } = args || {};
+    assertString(p, 'path');
+    try {
+      const full = safePath(ctx.cwd, p);
+      const content = fs.readFileSync(full, 'utf8');
+      const { body } = parseFrontmatter(content);
+
+      // Split by headings (any level: #, ##, ###, etc.)
+      const sections = [];
+      let current = { heading: '(top)', level: 0, start: 0 };
+      const lines = body.split('\n');
+      let pos = 0;
+      for (let i = 0; i < lines.length; i++) {
+        const hMatch = lines[i].match(/^(#{1,6})\s+(.+)/);
+        if (hMatch) {
+          current.end = pos;
+          current.content = body.slice(current.start, current.end);
+          if (current.content.trim()) sections.push(current);
+          current = { heading: hMatch[2].trim(), level: hMatch[1].length, start: pos };
+        }
+        pos += lines[i].length + 1;
+      }
+      current.end = body.length;
+      current.content = body.slice(current.start, current.end);
+      if (current.content.trim()) sections.push(current);
+
+      // No heading specified — return table of contents with char counts
+      if (!heading) {
+        const toc = sections.map(s => {
+          const indent = '  '.repeat(Math.max(0, s.level - 1));
+          return `${indent}- ${s.heading} (${s.content.trim().length} chars)`;
+        }).join('\n');
+        return truncate(`Sections in ${p}:\n${toc}\n\nUse read_section with heading to read a specific section.`);
+      }
+
+      // Find matching section (case-insensitive partial match)
+      const headingLower = heading.toLowerCase();
+      const match = sections.find(s => s.heading.toLowerCase().includes(headingLower));
+      if (!match) {
+        const available = sections.map(s => s.heading).join(', ');
+        return `Heading "${heading}" not found. Available: ${available}`;
+      }
+      return truncate(match.content, CONFIG.maxToolOutputChars * 2);
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(`read_section failed: ${error.message}`, 'TOOL_ERROR');
+    }
+  },
+
+  // Spawn a focused subagent with its own fresh context.
+  // The parent decomposes a big task into small chunks; each child gets a clean context window,
+  // a focused instruction, and a limited turn budget. The child's final output is returned to
+  // the parent — the parent never sees the child's intermediate tool results.
+  async spawn_agent(args, ctx) {
+    const { task, instruction, max_turns } = args || {};
+    assertString(task, 'task');
+    const depth = (ctx._spawnDepth || 0) + 1;
+    if (depth > CONFIG.maxSpawnDepth) {
+      throw new AppError(`Max spawn depth (${CONFIG.maxSpawnDepth}) exceeded — subagents cannot nest further`, 'TOOL_ERROR');
+    }
+    const childTurns = Math.max(1, Math.min(10, max_turns || CONFIG.spawnMaxTurns));
+    const childInstruction = instruction
+      ? `${instruction.trim()}\n\nYou have ${childTurns} turns. Be concise and focused. Call finish_task when done.`
+      : `${AGENT_INSTRUCTION.trim()}\n\nYou are a focused subagent. Complete this specific task in ${childTurns} turns or fewer. Be concise. Call finish_task when done.`;
+    try {
+      logger.info(`Spawning subagent (depth ${depth}, turns ${childTurns}): ${task.slice(0, 80)}...`);
+      // Build a minimal agent loop inline — fresh messages, shared provider
+      const provider = ctx._provider;
+      const messages = [
+        { role: 'system', content: `${childInstruction}\n\n${TOOL_INSTRUCTIONS_FULL.trim()}` },
+        { role: 'user', content: task }
+      ];
+      let result = '';
+      for (let turn = 0; turn < childTurns; turn++) {
+        if (turn > 0) {
+          messages[0] = { role: 'system', content: `${childInstruction}\n\n${toolInstructionsBrief(turn, childTurns)}` };
+        }
+        const toSend = compressMessages(messages);
+        const { content } = await provider.complete({ messages: toSend });
+        messages.push({ role: 'assistant', content });
+        if (!content?.trim()) continue;
+        if (/<<AGENT_DONE>>|<<done>>/i.test(content)) { result = content; break; }
+        const toolCalls = parseToolCalls(content);
+        if (toolCalls.length > 0) {
+          const results = await executeTools(toolCalls, { ...ctx, _spawnDepth: depth });
+          const finishResult = results.find(r => r.name === 'finish_task' && r.status === 'ok');
+          if (finishResult) { result = finishResult.text; break; }
+          messages.push({ role: 'user', content: `[TOOL RESULTS]\n${results.map(r => r.text).join('\n')}` });
+          continue;
+        }
+        result = content;
+      }
+      if (!result) result = messages.filter(m => m.role === 'assistant').pop()?.content || 'Subagent produced no output';
+      // Strip the <<AGENT_DONE>> marker so parent sees clean text
+      result = result.replace(/<<AGENT_DONE>>/g, '').trim();
+      logger.info(`Subagent completed (depth ${depth})`);
+      return truncate(result, CONFIG.maxToolOutputChars * 2, 'Subagent output truncated — ask for a more focused task');
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(`spawn_agent failed: ${error.message}`, 'TOOL_ERROR');
+    }
+  },
+
+  // Signal that the task is complete. The agent loop checks for <<AGENT_DONE>> to stop cleanly.
+  // This is better than hoping the model stops on its own — local models often ramble past the
+  // answer or get stuck in loops without an explicit finish mechanism.
+  async finish_task(args, ctx) {
+    const { summary, files_created } = args || {};
+    assertString(summary, 'summary');
+    const fileList = Array.isArray(files_created) && files_created.length
+      ? `\nFiles: ${files_created.join(', ')}`
+      : '';
+    return `<<AGENT_DONE>>${fileList}\n${summary}`;
+  },
+
   // TODO: ADD YOUR TOOLS HERE
-  // Copy the pattern above and implement tools for your specific agent
-  // Remember to:
-  // - Give tools descriptive names
-  // - Validate all inputs
-  // - Return useful information
-  // - Handle errors gracefully
-  // - Keep outputs concise (they're auto-truncated)
-
-  // Common tool patterns to implement:
-
-  // File tool example:
-  // async write_file(args, ctx) {
-  //   const { path: filePath, content } = args || {};
-  //   assertString(filePath, 'path');
-  //   const fullPath = safePath(ctx.cwd, filePath);
-  //   fs.writeFileSync(fullPath, content || '', 'utf8');
-  //   return `Wrote ${Buffer.byteLength(content || '')} bytes to ${filePath}`;
-  // }
-
-  // Web tool example:
-  // async fetch_url(args, ctx) {
-  //   const { url } = args || {};
-  //   assertString(url, 'url');
-  //   const response = await fetch(url);
-  //   const text = await response.text();
-  //   return truncate(`Status: ${response.status}\n${text}`);
-  // }
-
-  // Analysis tool example:
-  // async analyze_text(args, ctx) {
-  //   const { text, analysis_type } = args || {};
-  //   // Perform analysis
-  //   return `Analysis: [findings, insights, recommendations]`;
-  // }
+  // Replace example_tool above with your domain-specific tools.
+  // Follow the same pattern: extract args → validate → do work → return truncated result.
+  // Built-in tools (list_files, read_file, write_file, fetch_url, search_web, scrape_page,
+  // download_file, delete_file, define_tool, finish_task, spawn_agent) and knowledge tools
+  // (ingest_source, read_manifest, mark_compiled, search_context, save_learning, read_section)
+  // are available.
 };
 
 // ======== AGENT CONFIGURATION ========
@@ -643,8 +1078,8 @@ Focus on:
 - [Specific requirements]
 `;
 
-// Universal tool instructions (don't modify)
-const TOOL_INSTRUCTIONS = `
+// Full tool instructions — sent on turn 1 only to save context on subsequent turns
+const TOOL_INSTRUCTIONS_FULL = `
 When you need to use a tool, emit the exact syntax:
 <<tool:tool_name {"parameter": "value"}>>
 
@@ -653,24 +1088,29 @@ Available tools: ${toolListInline()}
 Quick reference:
 ${toolBullets()}
 
-Remember:
+Rules:
 - Use strict JSON in tool calls (no trailing commas, quoted keys).
 - Make multiple focused calls instead of one huge one.
 - If a step fails, try an alternative and explain what changed.
 - Keep outputs concise and well-organized.
 - Before any tool calls, rewrite the bracketed scaffold with concrete values.
 - If you must assume something, state the assumption briefly and continue.
-- If you’re unsure about a tool’s parameters, call the helper: <<tool:help {"tool":"TOOL_NAME"}>>
+- When done, call finish_task with a summary of what was accomplished.
 
 First‑Turn Protocol (MUST DO):
 1. Agent Setup — Overwrite the scaffold with concrete values.
 2. Plan — Provide a short bullet plan listing actions and tools.
 3. Execute — Call tools using strict JSON payloads.
-4. Deliver — Save artifacts to declared paths and list file paths.
+4. Deliver — Call finish_task with a summary and list of created files.
 `;
 
-// Combine them (single, final system message)
-const FULL_INSTRUCTION = `${AGENT_INSTRUCTION.trim()}\n\n${TOOL_INSTRUCTIONS.trim()}`;
+// Brief reminder — sent on turn 2+ to conserve context for local models
+function toolInstructionsBrief(turn, maxTurns) {
+  return `Turn ${turn + 1}/${maxTurns}. Tools: ${toolListInline()}. Syntax: <<tool:name {"arg":"val"}>>\nWhen done, call finish_task.`;
+}
+
+// Combine agent persona + full tool instructions for the first system message
+const FULL_INSTRUCTION = `${AGENT_INSTRUCTION.trim()}\n\n${TOOL_INSTRUCTIONS_FULL.trim()}`;
 
 // ======== PROVIDERS ========
 class OllamaProvider {
@@ -746,7 +1186,7 @@ class AnthropicProvider {
           role: m.role === 'assistant' ? 'assistant' : 'user',
           content: [{ type: 'text', text: String(m.content || '') }]
         }));
-      const body = { model: this.model, max_tokens: 1024, messages: convo };
+      const body = { model: this.model, max_tokens: CONFIG.maxLLMOutputTokens, messages: convo };
       if (system) body.system = system;
 
       const res = await fetch(`${this.baseUrl}/v1/messages`, {
@@ -826,10 +1266,10 @@ function inferProviderFromModel(model) {
   if (!s) return '';
   // OpenAI models: gpt-5 family, gpt-4 family, gpt-3.5, o-series
   if (/^(gpt-[345]|o[1-9])/.test(s)) return 'openai';
-  // Anthropic models: claude or specific model names
-  if (s.startsWith('claude') || s.includes('sonnet') || s.includes('haiku') || s.includes('opus')) return 'anthropic';
-  // Gemini models: gemini prefix or version patterns like 2.0, 2.5
-  if (s.startsWith('gemini') || s.includes('flash') || s.includes('pro') || /gemini.*\d\.\d/.test(s)) return 'gemini';
+  // Anthropic models: must start with "claude" (avoids matching random models with "sonnet"/"opus" in name)
+  if (/^claude/.test(s)) return 'anthropic';
+  // Gemini models: must start with "gemini" (avoids matching random models with "flash"/"pro" in name)
+  if (/^gemini/.test(s)) return 'gemini';
   return '';
 }
 
@@ -930,37 +1370,58 @@ function parseToolCalls(text) {
   return calls;
 }
 
-async function executeTools(calls, ctx) {
-  const results = [];
-
-  for (const call of calls) {
-    const tool = ToolRegistry[call.name];
-    if (!tool) {
-      results.push({
-        name: call.name,
-        error: `Unknown tool: ${call.name}`
-      });
-      continue;
-    }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), CONFIG.toolTimeoutMs);
-
-    try {
-      const output = await tool(call.args, { ...ctx, signal: controller.signal });
-      results.push({ name: call.name, output: truncate(output) });
-    } catch (e) {
-      results.push({
-        name: call.name,
-        error: e.message || 'Tool execution failed',
-        args: call.args
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
+async function executeSingleTool(call, ctx) {
+  const tool = ToolRegistry[call.name];
+  if (!tool) {
+    return { name: call.name, status: 'fail', text: formatError(call.name, { message: `Unknown tool: ${call.name}. Use help to list available tools.`, code: '' }) };
   }
 
-  return results;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CONFIG.toolTimeoutMs);
+
+  try {
+    const output = await tool(call.args, { ...ctx, signal: controller.signal });
+    const text = truncate(output);
+    const isEmpty = !text || !text.trim();
+    return {
+      name: call.name,
+      status: isEmpty ? 'empty' : 'ok',
+      text: isEmpty ? `[EMPTY] ${call.name}: no output` : `[OK] ${call.name}: ${text}`
+    };
+  } catch (e) {
+    return { name: call.name, status: 'fail', text: formatError(call.name, e) };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function executeTools(calls, ctx) {
+  // Run all calls in parallel — independent tool invocations don't need to wait for each other
+  return Promise.all(calls.map(call => executeSingleTool(call, ctx)));
+}
+
+// Compress older messages to free context for local models.
+// Keeps the system message, the last 4 messages, and summarizes everything in between.
+function compressMessages(messages) {
+  if (messages.length <= 6) return messages;
+
+  const system = messages[0];
+  const middle = messages.slice(1, -4);
+  const recent = messages.slice(-4);
+
+  const summary = middle
+    .filter(m => m.role === 'assistant' || m.content.startsWith('[TOOL'))
+    .map(m => {
+      const preview = m.content.slice(0, 150).replace(/\n/g, ' ');
+      return m.role === 'assistant' ? `Assistant: ${preview}` : preview;
+    })
+    .join('\n');
+
+  return [
+    system,
+    { role: 'user', content: `[Earlier work summary]\n${summary}` },
+    ...recent
+  ];
 }
 
 async function runAgent({ task, model, provider: providerHint, openaiKey, anthropicKey, geminiKey, saveKeys, yolo = false, cwd = process.cwd() }) {
@@ -982,14 +1443,31 @@ async function runAgent({ task, model, provider: providerHint, openaiKey, anthro
   for (let turn = 0; turn < CONFIG.maxTurns; turn++) {
     logger.debug(`Turn ${turn + 1}/${CONFIG.maxTurns}`);
 
-    const { content, done } = await provider.complete({ messages });
+    // Turn-aware prompting: swap system message to brief version after turn 1
+    if (turn > 0) {
+      messages[0] = {
+        role: 'system',
+        content: `${AGENT_INSTRUCTION.trim()}\n\n${toolInstructionsBrief(turn, CONFIG.maxTurns)}`
+      };
+    }
+
+    // Compress older messages to conserve context for local models
+    const toSend = compressMessages(messages);
+
+    const { content, done } = await provider.complete({ messages: toSend });
     logger.debug(`Response length: ${content?.length || 0} chars, done: ${done}`);
     if (content?.trim()) { logger.debug(`Response preview: ${content.slice(0, 300).replace(/\n/g, '\\n')}...`); }
     messages.push({ role: 'assistant', content });
+
     // Skip empty responses entirely
     if (!content?.trim()) {
       logger.debug('Skipping empty response');
       continue;
+    }
+
+    // Check for explicit finish via finish_task tool or <<done>> / <<AGENT_DONE>>
+    if (/<<AGENT_DONE>>|<<done>>/i.test(content)) {
+      return content;
     }
 
     const toolCalls = parseToolCalls(content);
@@ -1007,21 +1485,24 @@ async function runAgent({ task, model, provider: providerHint, openaiKey, anthro
         return content;
       }
 
-      const results = await executeTools(toolCalls, { cwd });
-      const toolOutput = results.map(r =>
-        r.error
-          ? `> ${r.name} ARGS=${JSON.stringify(r.args)}: ERROR: ${r.error}`
-          : `> ${r.name}: ${r.output}`
-      ).join('\n');
+      const results = await executeTools(toolCalls, { cwd, _provider: provider, _spawnDepth: 0 });
+
+      // Check if finish_task was among the results
+      const finishResult = results.find(r => r.name === 'finish_task' && r.status === 'ok');
+      if (finishResult) {
+        return finishResult.text;
+      }
+
+      const toolOutput = results.map(r => r.text).join('\n');
 
       messages.push({
         role: 'user',
-        content: `[TOOL OUTPUT]\n${toolOutput}`
+        content: `[TOOL RESULTS]\n${toolOutput}`
       });
       continue;
     }
 
-    if (done || /<<done>>/i.test(content) || turn === CONFIG.maxTurns - 1) {
+    if (done || turn === CONFIG.maxTurns - 1) {
       return content;
     }
   }
@@ -1030,7 +1511,7 @@ async function runAgent({ task, model, provider: providerHint, openaiKey, anthro
   logger.error(`Model: ${provider.model} | Last response had ${lastToolCallCount} tool calls`);
   logger.error('Suggestions:');
   logger.error('  - Try a different model (mistral-small, qwen3-coder, deepseek-r1:32b work well)');
-  logger.error('  - Increase maxTurns in CONFIG (currently 5)');
+  logger.error(`  - Increase turns: --max-turns 10 (currently ${CONFIG.maxTurns})`);
   logger.error('  - Run with LOG_LEVEL=debug to see model responses');
   logger.error('  - Simplify the task or break it into smaller steps');
   throw new AppError('Max turns reached without completion');
@@ -1056,6 +1537,7 @@ function parseArgs(argv) {
     else if (arg === '--anthropic-key') { args.anthropicKey = argv[++i]; }
     else if (arg === '--gemini-key') { args.geminiKey = argv[++i]; }
     else if (arg === '--save-keys') { args.saveKeys = true; }
+    else if (arg === '--help' || arg === '-h') { args.help = true; }
     else if (!arg.startsWith('-')) { positional.push(arg); }
     else { console.warn(`[WARN] Unknown flag ${arg} (ignored)`); }
   }
@@ -1070,13 +1552,19 @@ async function main() {
     // Load .env early so any provider base URLs or keys set there are visible
     loadDotEnvToProcess(args.cwd);
 
-    if (!args.task) {
+    // Fall back to defaultTask if no task provided on CLI
+    if (!args.task && CONFIG.defaultTask) {
+      args.task = CONFIG.defaultTask;
+    }
+
+    if (!args.task || args.help) {
       console.log(`
 Simple Agent Runner
 
 Usage:
   node agent.js "Your task here"
   node agent.js "Your task" --yolo                    # Auto-execute tools
+  node agent.js --yolo                                # Run default task (if configured)
   node agent.js "Your task" --model deepseek-r1       # Choose Ollama model
   node agent.js "Your task" --cwd ./workspace         # Set working dir
   node agent.js "Your task" --max-turns 10            # Override max turns (default: 5)
@@ -1088,7 +1576,7 @@ Examples:
   node agent.js "Write a hello world program"
   node agent.js "Research topic X and create a report" --yolo
   node agent.js "Analyze this codebase" --cwd ./src
-
+${CONFIG.defaultTask ? `\nDefault task: "${CONFIG.defaultTask}"\n  Run with just: node agent.js --yolo` : ''}
 Models:
   Default: mistral-small (via Ollama)
   Ollama: mistral-small, mixtral, llama3.2, deepseek-r1, qwen2.5, codellama, etc.

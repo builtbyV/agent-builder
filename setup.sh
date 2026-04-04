@@ -338,7 +338,7 @@ if command -v ollama &> /dev/null; then
         
         # Check for models
         # Check if any models are installed (ollama list will show models with their version tags)
-        if ollama list 2>/dev/null | grep -E "mistral-small:|gpt-oss:|deepseek-r1:|qwen3:|magistral:|mistral:|llama|gemma|phi|codellama" > /dev/null; then
+        if ollama list 2>/dev/null | grep -E "mistral-small:|gpt-oss:|deepseek-r1:|qwen3:|qwen3.5:|qwen3-coder|magistral:|mistral:|llama|gemma|gemma4:|phi|codellama|minimax|kimi|glm" > /dev/null; then
             show_done "Ollama models detected"
             OLLAMA_READY=true
         else
@@ -373,7 +373,7 @@ else
     echo ""
     echo -e "${YELLOW}Ollama is needed for agents to run locally (free)${NC}"
     echo -e "To install Ollama:"
-    echo "1. Visit https://ollama.ai"
+    echo "1. Visit https://ollama.com"
     echo "2. Download for your system"
     echo "3. Run the installer"
     echo "4. Come back and run this setup again"
@@ -405,12 +405,16 @@ Thumbs.db
 *.tmp
 *.temp
 output/
+context/
 AGENTS.md
 CLAUDE.md
 setup.sh
 docs/
 agent.stub
+commit.md
 QUICK_REFERENCE.txt
+.env
+.env.local
 EOF
     show_done "Created .gitignore file"
 fi
@@ -465,17 +469,25 @@ HELPFUL TERMINAL COMMANDS:
 - Ctrl+C (or Command+C on Mac)  # Stop something running
 
 COMMON REQUESTS TO YOUR AI:
-- "Using agent.js, create a research agent"
-- "Build an agent that can analyze code"
+- "Create a research agent that analyzes news"
+- "Build a code review agent for security issues"
+- "Make a knowledge agent that compiles articles into a wiki"
 - "Create a data processing agent"
-- "Make an agent that writes content"
-- "Build an automation agent"
+- "Build an agent that writes content"
 
 RUNNING YOUR AGENTS:
-- node agent.js "task"        # Preview what agent will do
-- node agent.js "task" --yolo # Execute immediately
+- node agent.js "task"            # Preview what agent will do
+- node agent.js "task" --yolo     # Execute immediately
 - node agent.js "task" --model deepseek-r1  # Use specific model
-- node agent.js "task" --cwd ./folder   # Set working directory
+- node agent.js "task" --cwd ./folder       # Set working directory
+- node agent.js --yolo            # Run default task (if configured)
+
+BUILT-IN TOOLS (18):
+  Files: list_files, read_file, write_file, delete_file, read_section
+  Web: fetch_url, search_web, scrape_page, download_file
+  Knowledge: ingest_source, read_manifest, mark_compiled, search_context, save_learning
+  Orchestration: spawn_agent, finish_task
+  Meta: define_tool, help
 
 OLLAMA COMMANDS:
 - ollama serve         # Start Ollama

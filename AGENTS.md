@@ -1,73 +1,101 @@
-# AI Agent Creation Guide
+# Agent Creation Guide
 
-## Quick Start
+## Commands
 
-When a user asks you to create an agent, follow these steps:
-1. Copy `agent.stub` to `agent.js` (or another name like `my-agent.js`)
-2. Use this new file as your foundation
-3. Transform it into a working agent based on user requirements
-
-## Understanding the Request
-
-First, identify what kind of agent the user wants:
-
-1. **Purpose** - What is the agent's main job?
-   - Research and information gathering
-   - Code generation or analysis
-   - Content creation (articles, reports, documentation)
-   - Data analysis and visualization
-   - Task automation
-   - Domain-specific expertise (legal, medical, scientific)
-
-2. **Capabilities** - What tools will it need?
-   - File operations (read, write, organize)
-   - Web access (fetch URLs, search, scrape)
-   - Code execution or analysis
-   - API integrations
-   - Data processing
-   - Communication (email, notifications)
-
-3. **Output** - What should it produce?
-   - Files (reports, code, data)
-   - Direct answers
-   - Step-by-step analysis
-   - Structured data
-
-## Step-by-Step Agent Creation
-
-### Step 1: Copy the Stub
-
-First, duplicate `agent.stub` to create your working file:
 ```bash
-cp agent.stub agent.js  # Or use a descriptive name like research-agent.js
+cp agent.stub <name>.js                          # always copy, never edit agent.stub
+node <name>.js --yolo                             # run default task (if defaultTask is set)
+node <name>.js "task"                             # preview tool calls (safe)
+node <name>.js "task" --yolo                      # execute tools (overrides defaultTask)
+node <name>.js "task" --model deepseek-r1 --yolo  # specific Ollama model
+node <name>.js "task" --model openai:gpt-5-mini --yolo  # cloud provider
+node <name>.js "task" --max-turns 10 --yolo       # override 5-turn default
+node <name>.js "task" --cwd ./workspace --yolo    # confine file ops to dir
 ```
 
-Now work with this new file. It provides:
-- Tool calling infrastructure
-- Provider support (Ollama by default; OpenAI, Anthropic, Gemini via flags or model prefix)
-- Safety features (--yolo flag)
-- Error handling
-- CLI interface
-- Universal scaffold + universal tool rules
-- Tool discovery helper (`help`)
+Provider prefixes: `ollama:`, `openai:`, `anthropic:`, `gemini:` (or use `--provider`).
+API keys: `--openai-key sk-...` / `--anthropic-key` / `--gemini-key`, or env vars, or `.env` in cwd. Use `--save-keys` to persist.
 
-### Provider Selection Policy
-- Default: Ollama (local‑first, free, zero keys)
-- Explicit override: `--provider` or model prefixes `openai:`, `anthropic:`, `gemini:`, `ollama:`
-- Model-only inference: If model clearly implies a vendor (`gpt-[345]`, `claude-*`, `gemini-*`), route there; otherwise stick to Ollama
-- API keys: CLI flags > env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) > `.env` in CWD
-- Interactive only: If still missing in an interactive TTY, prompts for the key (hidden). Optional `--save-keys` appends to local `.env`
+## Gotchas
 
-### CLI Flags & Env
-- `--provider|-p openai|anthropic|gemini|ollama`
-- `--model|-m <model>` (prefix form also supported, e.g., `openai:gpt-5-mini`)
-- `--max-turns <number>` (override default 5 turns)
-- `--openai-key`, `--anthropic-key`, `--gemini-key` (override env)
-- `--save-keys` (write prompted key to `.env` in the working directory)
-- Env vars: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OLLAMA_HOST`
+- **Never modify `agent.stub` directly** — always `cp` first. The stub is the shared template.
+- **`safePath` confines all file ops to `--cwd`** — writing outside the workspace directory errors. Don't try absolute paths.
+- **4KB output truncation** — tool results default to 4096 chars (CONFIG.maxToolOutputChars). Pass a larger `max_bytes` to `read_file`/`fetch_url`/`scrape_page` to override. Split large reads into chunks or filter before returning.
+- **Ollama must be running** — start with `ollama serve` or the agent gets `ECONNREFUSED`. Check with `curl http://localhost:11434`.
+- **`maxTurns` defaults to 5** — complex multi-step tasks need `--max-turns 10` or higher via CLI flag.
+- **`define_tool` runs in a VM sandbox** — dynamic tools cannot `require()` modules. They get: `fetch`, `file.read/write/list`, `args`, `AppError`, `assertString`, `truncate`.
+- **Without `--yolo`, nothing executes** — tool calls are only previewed. Users must re-run with `--yolo` to execute.
+- **JSON repair is lenient but not magic** — the stub fixes trailing commas and unquoted keys, but double-encoded JSON or nested unescaped quotes still break.
+- **The scaffold says "do not ask the user to clarify"** — agent instructions should pick sensible defaults and state assumptions, not ask-for-more-info.
+- **Respect cancellation** — long-running tools should check `ctx.signal.aborted` and bail early.
+- **Always call `finish_task` when done** — local models often ramble past the answer or loop. `finish_task` emits `<<AGENT_DONE>>` which cleanly stops the agent loop. Set `defaultTask` and encode `finish_task` in the system prompt.
+- **Turn-aware prompting** — full tool instructions are sent on turn 1 only. Turn 2+ gets a brief reminder to conserve context for local models.
+- **Tools run in parallel** — all tool calls in a single response execute concurrently via `Promise.all`. Independent tools don't wait for each other.
+- **Error recovery hints** — tool failures include actionable hints (e.g., ENOENT → "Use list_files to check what exists"). The model sees `[OK]`/`[FAIL]`/`[EMPTY]` prefixes in tool results.
+- **Context compression** — after 6+ messages, older conversation history is summarized to free context window for local models.
+- **`spawn_agent` decomposes big tasks** — local models choke when context fills up. Use `spawn_agent` to split work into focused subtasks, each with a fresh context and 2-3 turn budget. The parent orchestrates; children do the heavy lifting. Max nesting depth: 3.
 
-### Universal Scaffold (Built‑in, fill this before tools)
-The runner ships a single scaffold for any agent type. Replace all `[BRACKETED]` fields before calling tools. If something is ambiguous, choose sensible defaults and state them briefly—don’t ask for clarification.
+## Workflow
+
+When a user asks to create an agent:
+
+1. **Extract core intent** — purpose, tools needed, output format, what "done" looks like. Look for both explicit requirements and implicit needs. Consider any project-specific context (existing AGENTS.md files, coding standards, established patterns) to ensure the agent aligns with the project. For code review agents, assume the user means *recently written code*, not the whole codebase, unless stated otherwise.
+2. **Design expert persona** — concrete role + domain (e.g., "senior security researcher specializing in OWASP top 10"), not generic "helpful assistant"
+3. **Name it** — lowercase hyphenated, 2-4 words: `csv-data-analyst`, `tech-news-researcher`. Avoid "helper", "assistant", "bot"
+4. **Check model** — run `ollama list` to see installed models, and check system resources. Pick a model that fits the agent's needs and the machine's RAM (see "Model Selection" below)
+5. **Copy stub** — `cp agent.stub <identifier>.js`
+6. **Fill the scaffold** — in `AGENT_INSTRUCTION`, replace every `[BRACKETED]` field with concrete values from steps 1-2. Do this before anything else
+7. **Set `defaultTask`** — in CONFIG, set `defaultTask` to the agent's primary purpose (e.g., `'Summarize all files in the working directory'`). This lets users run `node <name>.js --yolo` without repeating what the system prompt already describes. Users can still override: `node <name>.js "custom task" --yolo`
+8. **Replace `example_tool`** — implement domain-specific tools following the pattern in "Tool Implementation Pattern" below
+9. **Test** — `node <name>.js --yolo` to run the default task, or `node <name>.js "custom task"` to preview a custom one
+
+### Design do/don't
+
+Do:
+```
+You are a senior data engineer specialized in ETL pipeline debugging.
+
+Your approach:
+1. Read the pipeline config and identify the failing stage
+2. Inspect input data samples for schema mismatches
+3. Trace the transform chain to find where data is lost
+4. Write a fix and validate against sample data
+
+Output format:
+- Diagnosis as markdown with code snippets
+- Fixed config saved to ./output/
+```
+
+Don't:
+```
+You are a helpful agent that assists users with data tasks.
+
+Your approach:
+1. Understand the request
+2. Do the work
+3. Return results
+```
+
+The first gives the agent a decision-making framework. The second gives it nothing.
+
+### Architecting the System Prompt
+
+The system prompt is the agent's complete operational manual. It should make the agent an autonomous expert that handles its designated tasks with minimal additional guidance.
+
+Write the `AGENT_INSTRUCTION` in second person ("You are...", "You will..."). Incorporate any specific requirements or preferences the user mentioned. Build it to include:
+
+1. **Behavioral boundaries** — what the agent should and shouldn't do. Name specific files, paths, or actions that are off-limits.
+2. **Domain methodology** — concrete step-by-step approach for the domain, not generic "analyze then respond." What does a real expert in this field actually do first, second, third?
+3. **Edge case handling** — anticipate where things go wrong. "If the CSV has no headers, treat the first row as data and generate column names." "If a source URL returns 403, skip it and note the gap."
+4. **Self-verification** — the agent should check its own work before delivering. "After writing the report, re-read it and verify all citations have matching sources."
+5. **Escalation / fallback** — what to do when tools fail or results are ambiguous. "If search returns no results, broaden the query. If still empty, state what was attempted."
+6. **Output contract** — exact format, file paths, and structure. "Save as `./output/<topic>_report.md` with sections: Executive Summary, Findings, Sources."
+
+Every instruction should trace to a decision the agent would otherwise get wrong.
+
+## The Scaffold
+
+The `AGENT_INSTRUCTION` in the stub ships this template. Replace ALL `[BRACKETED]` fields before calling any tools:
 
 ```
 You are a [ROLE/TYPE] specialized in [DOMAIN/EXPERTISE].
@@ -89,280 +117,113 @@ Focus on:
 - [Specific requirements]
 ```
 
-### First‑Turn Protocol (MUST DO)
-1. Agent Setup — Rewrite the scaffold with concrete values.
-2. Plan — A short bullet list of actions and which tools you’ll call.
-3. Execute — Call tools using strict JSON.
-4. Deliver — Save artifacts to the declared paths and summarize results (show paths).
+### First-Turn Protocol (MUST DO)
 
-Tip: Tool discovery:
-- `<<tool:help {}>>` lists tools
-- `<<tool:help {"tool":"write_file"}>>` shows a tool’s signature and example payload
+The agent's first response must follow this sequence:
+1. **Agent Setup** — rewrite the scaffold with concrete values
+2. **Plan** — short bullet list of actions and which tools to call
+3. **Execute** — call tools using strict JSON
+4. **Deliver** — call `finish_task` with a summary and list of created files
 
-### Step 2: Implement Core Tools
+## Tool Implementation Pattern
 
-Replace the `example_tool` with actual implementations. Follow this pattern:
+Replace `example_tool` with domain tools. Every tool follows this shape:
 
 ```javascript
 async tool_name(args, ctx) {
-  // 1. Extract parameters
   const { param1, param2 = 'default' } = args || {};
-  
-  // 2. Validate required parameters
   assertString(param1, 'param1');
-  
-  // 3. Implement logic
   try {
-    // Your implementation here
     const result = await doWork(param1, param2);
-    
-    // 4. Return concise result (auto-truncated)
     return truncate(result);
   } catch (error) {
-    // 5. Handle errors gracefully
     throw new AppError(`Tool failed: ${error.message}`);
   }
 }
 ```
 
-### Step 3: Customize Agent Instructions
+### Domain Tool Signatures by Agent Type
 
-Modify the `AGENT_INSTRUCTION` (now a universal scaffold) to define:
+**Research**: `web_search(query, max_results)`, `summarize_article(url, max_words)`, `compile_report(topic, sources, format)`
+**Coding**: `analyze_code(path, language)`, `generate_tests(code, framework)`, `refactor_code(path, patterns)`
+**Data**: `load_data(path, format)`, `analyze_trends(data, metrics)`, `generate_visualization(data, chart_type, output_path)`
+**Knowledge**: `ingest_source(title, content, tags)`, `read_manifest(filter)`, `mark_compiled(file)`, `search_context(query)`, `save_learning(content, category)`, `read_section(path, heading?)`
+**Orchestration**: `spawn_agent(task, instruction?, max_turns?)`, `finish_task(summary, files_created?)`
 
-1. **Role and Identity**
-   ```javascript
-   You are a [specific type] agent specialized in [domain].
-   Your expertise includes [key areas].
-   ```
+Use `verb_noun` naming. Each tool does one thing. All paths go through `safePath(ctx.cwd, path)`.
 
-2. **Approach and Methodology** (fill bracketed placeholders first)
-   ```javascript
-   Approach tasks by:
-   1. [First step in your methodology]
-   2. [Second step]
-   3. [Continue with specific steps]
-   ```
+### Dynamic Tool Creation
 
-3. **Tool Usage Guidelines**
-   ```javascript
-   Use tools in this order:
-   - Use [tool_name] to [purpose]
-   - Use [tool_name] when [condition]
-   - Chain [tool1] -> [tool2] for [complex task]
-   ```
+Agents can create tools at runtime when a built-in tool doesn't exist:
 
-4. **Output Formatting**
-
-Universal rules included in the stub:
-- Use exact tool syntax: `<<tool:tool_name {"parameter":"value"}>>`
-- Fill all `[BRACKETED]` placeholders in the scaffold before calling any tools
-- Use strict JSON in tool calls (quoted keys, no trailing commas)
-- Make multiple focused calls instead of one huge one
-- If a step fails, try an alternative and explain what changed
-   ```javascript
-   Format your responses as:
-   - [Specific format requirements]
-   - Save artifacts as [file types]
-   - Include [required sections]
-   ```
-
-### Step 4: Add Domain-Specific Tools
-
-Based on the agent type, implement appropriate tools:
-
-#### For Research Agents
 ```javascript
-async web_search(args, ctx) {
-  const { query, max_results = 5 } = args || {};
-  // Implementation
-}
+<<tool:define_tool {"name": "call_api", "code": "const response = await fetch(args.endpoint, { method: args.method || 'GET', headers: args.headers || {} }); return `Status: ${response.status}\\n${await response.text()}`;"}>
+```
 
-async summarize_article(args, ctx) {
-  const { url, max_words = 200 } = args || {};
-  // Implementation
-}
+Dynamic tools run in a sandbox — they get `fetch`, `file.read/write/list`, `args`, and the helper functions, but cannot `require()` modules.
 
-async compile_report(args, ctx) {
-  const { topic, sources, format = 'markdown' } = args || {};
-  // Implementation
+## Agent Definition Format
+
+When producing a cataloged agent definition, output:
+
+```json
+{
+  "identifier": "A unique, descriptive identifier using lowercase letters, numbers, and hyphens (e.g., 'test-runner', 'api-docs-writer', 'code-formatter')",
+  "whenToUse": "A precise, actionable description starting with 'Use this agent when...' that clearly defines triggering conditions and use cases, with examples showing Agent tool invocation",
+  "systemPrompt": "The complete AGENT_INSTRUCTION content, written in second person ('You are...', 'You will...'), structured for maximum clarity"
 }
 ```
 
-#### For Coding Agents
-```javascript
-async analyze_code(args, ctx) {
-  const { path, language } = args || {};
-  // Implementation
-}
+### Writing whenToUse
 
-async generate_tests(args, ctx) {
-  const { code, framework = 'jest' } = args || {};
-  // Implementation
-}
+Start with "Use this agent when..." and include 2-3 examples showing an AI assistant invoking the agent. Use the commentary pattern so the assistant knows *why* to launch it:
 
-async refactor_code(args, ctx) {
-  const { path, patterns } = args || {};
-  // Implementation
-}
+**Reactive example** (user explicitly asks):
+```
+user: "Analyze this CSV and find outliers"
+assistant: [uses Agent tool to launch csv-data-analyst with the file path]
+<commentary>
+The user is asking for data analysis — use the csv-data-analyst agent.
+</commentary>
 ```
 
-#### For Data Analysis Agents
-```javascript
-async load_data(args, ctx) {
-  const { path, format = 'csv' } = args || {};
-  // Implementation
-}
-
-async analyze_trends(args, ctx) {
-  const { data, metrics } = args || {};
-  // Implementation
-}
-
-async generate_visualization(args, ctx) {
-  const { data, chart_type, output_path } = args || {};
-  // Implementation
-}
+**Proactive example** (agent fires without being asked):
+```
+user: "Write a function that validates email addresses"
+assistant: [writes the function]
+<commentary>
+Since a significant piece of code was written, use the test-runner agent
+to verify it works.
+</commentary>
+assistant: [uses Agent tool to launch test-runner]
 ```
 
-## Common Patterns
+**Critical:** In examples, the assistant must use the Agent tool to launch the agent — not respond to the task directly itself. The whenToUse teaches the assistant *when to delegate*, not when to do the work inline.
 
-### 1. File-Based Workflow
-```javascript
-// Read -> Process -> Write pattern
-async process_files(args, ctx) {
-  const { input_dir, output_dir, operation } = args || {};
-  
-  // List files
-  const files = fs.readdirSync(safePath(ctx.cwd, input_dir));
-  
-  // Process each file
-  for (const file of files) {
-    const content = fs.readFileSync(safePath(ctx.cwd, `${input_dir}/${file}`), 'utf8');
-    const processed = await performOperation(content, operation);
-    fs.writeFileSync(safePath(ctx.cwd, `${output_dir}/${file}`), processed);
-  }
-  
-  return `Processed ${files.length} files`;
-}
-```
+If the agent should be used proactively (auto-test, auto-lint, auto-review), the whenToUse MUST include proactive examples — otherwise the assistant won't know to invoke it unprompted.
 
-### 2. Web Research Pattern
-```javascript
-// Search -> Fetch -> Extract -> Synthesize
-async research_topic(args, ctx) {
-  const { topic, depth = 'medium' } = args || {};
-  
-  // First, search for sources
-  const searchResults = await searchWeb(topic);
-  
-  // Fetch content from top sources
-  const contents = [];
-  for (const url of searchResults.slice(0, 5)) {
-    const content = await fetchUrl(url);
-    contents.push(extractKeyInfo(content));
-  }
-  
-  // Synthesize findings
-  const synthesis = synthesizeFindings(contents);
-  
-  // Save report
-  fs.writeFileSync(
-    safePath(ctx.cwd, `${topic.replace(/\s+/g, '_')}_report.md`),
-    synthesis
-  );
-  
-  return `Research complete. Report saved with ${contents.length} sources analyzed.`;
-}
-```
-
-### 3. Multi-Step Processing
-```javascript
-// Complex workflows with intermediate steps
-async complex_workflow(args, ctx) {
-  const { input, stages = ['analyze', 'transform', 'validate'] } = args || {};
-  
-  let result = input;
-  const stageResults = [];
-  
-  for (const stage of stages) {
-    if (ctx.signal?.aborted) break;
-    
-    result = await processStage(stage, result);
-    stageResults.push({ stage, summary: summarize(result) });
-  }
-  
-  return `Workflow complete:\n${stageResults.map(s => `- ${s.stage}: ${s.summary}`).join('\n')}`;
-}
-```
-
-## Dynamic Tool Creation
-
-If the agent needs a tool that doesn't exist, it can create one on the fly:
-
-```javascript
-// Example: Agent creates a custom API integration
-<<tool:define_tool {"name": "call_api", "code": "const response = await fetch(args.endpoint, { method: args.method || 'GET', headers: args.headers || {}, body: args.body ? JSON.stringify(args.body) : undefined }); return `Status: ${response.status}\\n${await response.text()}`;"}>
-```
-
-## Testing Your Agent
-
-1. **Test without execution first**
-   ```bash
-   node agent.js "Your test task"
-   ```
-   Review the planned tool calls.
-
-2. **Test with simple tasks**
-   ```bash
-   node agent.js "Write a hello world file" --yolo
-   ```
-
-3. **Test complex workflows**
-   ```bash
-   node agent.js "Research AI trends and create a report" --yolo
-   ```
-
-## Best Practices
-
-### Tool Design
-- **Single Responsibility**: Each tool should do one thing well
-- **Descriptive Names**: Use `verb_noun` format (e.g., `fetch_data`, `analyze_code`)
-- **Validate Inputs**: Always validate required parameters
-- **Handle Errors**: Provide helpful error messages
-- **Return Useful Output**: Include relevant details for the agent to continue
-
-### Agent Instructions
-- **Be Specific**: Clear, step-by-step instructions
-- **Include Examples**: Show how tools should be used
-- **Define Success**: What constitutes a complete task
-- **Handle Edge Cases**: What to do when things go wrong
-
-### Performance
-- **Truncate Outputs**: Large outputs are automatically truncated to 4KB
-- **Batch Operations**: Process multiple items in single tool calls when possible
-- **Check Cancellation**: Respect `ctx.signal.aborted` in long operations
-- **Cache When Possible**: Avoid redundant operations
-
-## Examples by Agent Type
+## Complete Examples
 
 ### Research Agent
 ```javascript
 const AGENT_INSTRUCTION = `
-You are an expert research analyst specializing in technology trends.
+You are a senior technology analyst specializing in emerging AI trends.
 
 Your approach:
-1. Search for recent, authoritative sources
-2. Verify information across multiple sources
-3. Synthesize findings into actionable insights
-4. Create well-structured reports with citations
+1. Search for recent authoritative sources (last 6 months)
+2. Cross-reference claims across 3+ sources
+3. Synthesize into an executive summary with citations
+4. Save the report as markdown
+5. Call finish_task with a summary of findings
 
-When researching:
-- Prioritize recent sources (last 6 months)
-- Cross-reference at least 3 sources per claim
-- Save your report as markdown with proper formatting
-- Include an executive summary
+Output format:
+- Markdown report with sections: Summary, Key Findings, Sources
+- Save to ./output/<topic>_report.md
 
-Available tools: ${Object.keys(ToolRegistry).join(', ')}
+Focus on:
+- Recency and source authority
+- Actionable insights over raw information
+- Clearly flagging speculation vs established fact
 `;
 ```
 
@@ -371,115 +232,274 @@ Available tools: ${Object.keys(ToolRegistry).join(', ')}
 const AGENT_INSTRUCTION = `
 You are a senior software engineer specializing in code quality and architecture.
 
-Your expertise:
-- Code review and refactoring
-- Test generation and coverage
-- Performance optimization
-- Security analysis
-
 When working with code:
-1. First analyze the existing structure
-2. Identify patterns and anti-patterns
-3. Suggest improvements with explanations
+1. First analyze the existing structure and identify patterns
+2. Identify anti-patterns, security issues, and performance bottlenecks
+3. Suggest improvements with explanations of why
 4. Generate tests for critical paths
-5. Document your changes
+5. If refactoring, verify behavior is preserved by tracing sample inputs
+6. Call finish_task with findings and files created
 
-Always consider: readability, maintainability, performance, security.
-
-Available tools: ${Object.keys(ToolRegistry).join(', ')}
+Output format:
+- Inline comments for specific issues
+- Summary report saved to ./output/review.md
+- Generated tests saved alongside source files
 `;
 ```
 
-### Data Analyst Agent
+## Knowledge Agent Pattern
+
+### Overview
+
+The compounding wiki is a zero-infrastructure knowledge management pattern. Raw sources go in, the LLM compiles them into structured wiki articles, outputs get filed back, and every interaction enriches the knowledge base. No database, no vector store — just `.md` files with YAML frontmatter and a JSON manifest.
+
+The key insight is **index-first routing**: read `wiki/index.md` first to decide where to look, like a human scanning a table of contents. This avoids brute-force file scanning and scales as the wiki grows.
+
+### Directory Convention
+
+```
+context/
+├── raw/                 # Ingested sources (.md with YAML frontmatter)
+│   └── .manifest.json   # Tracks ingest/compile state
+├── wiki/                # LLM-compiled knowledge
+│   ├── index.md         # Master routing index (1-line summaries)
+│   ├── concepts/        # One article per concept
+│   └── summaries/       # One summary per raw doc
+└── learnings.md         # Operational memory (append-only)
+```
+
+All paths are relative to `--cwd`. The agent creates directories on first use.
+
+### File Format Specs
+
+**Raw document** (`context/raw/*.md`):
+```yaml
+---
+title: The article title
+source: user | https://example.com
+ingested: 2026-04-04
+tags: [tag1, tag2]
+type: article | transcript | notes | reference
+compiled: false
+---
+
+Content goes here...
+```
+
+**Wiki concept article** (`context/wiki/concepts/*.md`):
+```yaml
+---
+title: Concept Name
+created: 2026-04-04
+updated: 2026-04-04
+sources: [raw-doc-slug.md, another-slug.md]
+related: [other-concept.md]
+tags: [tag1, tag2]
+---
+
+Synthesized explanation of the concept...
+```
+
+**Wiki summary** (`context/wiki/summaries/*.md`):
+```yaml
+---
+title: Summary of Source Title
+source: raw-doc-slug.md
+created: 2026-04-04
+---
+
+Condensed summary of the source document...
+```
+
+**Wiki index** (`context/wiki/index.md`):
+```markdown
+# Knowledge Index
+> 12 concepts, 8 summaries — updated 2026-04-04
+
+## Concepts
+- [concept-name.md](concepts/concept-name.md) — One-line summary
+- [another-concept.md](concepts/another-concept.md) — One-line summary
+
+## Summaries
+- [source-title.md](summaries/source-title.md) — One-line summary
+```
+
+**Manifest** (`context/raw/.manifest.json`):
+```json
+[
+  { "file": "slug.md", "title": "Title", "source": "user", "ingested": "2026-04-04", "compiled": false }
+]
+```
+
+**Learnings** (`context/learnings.md`):
+```markdown
+# Operational Learnings
+
+## [discovery] — 2026-04-04
+
+What was learned...
+
+---
+```
+
+### The Compilation Loop
+
+This is what the LLM does using the built-in tools. Encode this workflow in the agent's system prompt:
+
+1. **Discover** — `read_manifest({"filter":"uncompiled"})` to find unprocessed sources
+2. **Read** — `read_file` each uncompiled raw source
+3. **Compile** — For each source:
+   - Write a summary to `context/wiki/summaries/` using `write_file`
+   - Extract key concepts, create or update articles in `context/wiki/concepts/` using `write_file`
+   - Cross-reference: add `related` links between concept articles that share themes
+4. **Index** — Read existing `context/wiki/index.md`, merge new entries, write back
+5. **Mark** — `mark_compiled({"file":"slug.md"})` for each processed source
+6. **Learn** — `save_learning` about discoveries, patterns, or corrections found
+
+Steps 3–4 use existing `read_file`/`write_file`. The knowledge tools handle ingestion and state tracking; the LLM handles synthesis.
+
+### Handling Large Files
+
+Two built-in mechanisms prevent large markdown files from blowing context:
+
+**Auto-split on ingest:** `ingest_source` automatically splits content larger than 8KB into multiple parts, breaking on heading boundaries. Each part gets its own manifest entry linked by a `group` field, so the compiler can process them incrementally.
+
+**Section-level reading:** `read_section` navigates any `.md` file by heading structure:
+- `read_section({"path":"context/raw/big-article.md"})` — returns table of contents with character counts per section
+- `read_section({"path":"context/raw/big-article.md", "heading":"Key Findings"})` — returns just that section
+
+This is the PageIndex principle at the file level: read the structure first (cheap), then pull specific content (targeted). Agents should prefer `read_section` over `read_file` for any file that might exceed 4KB.
+
+### Index-First Routing
+
+When answering questions from the knowledge base:
+
+1. `read_file({"path":"context/wiki/index.md"})` — scan the table of contents
+2. Identify relevant articles from the 1-line summaries
+3. `read_file` only those specific articles
+4. If no index match, fall back to `search_context({"query":"..."})` for full-text search
+5. Synthesize an answer citing the source articles
+
+This is the key scaling strategy. As the wiki grows from 10 to 100+ articles, the index keeps retrieval fast and token-efficient — the agent reads one file to decide which others to pull, not every file.
+
+### Knowledge Agent Example
+
 ```javascript
 const AGENT_INSTRUCTION = `
-You are a data scientist specializing in business intelligence.
+You are a senior knowledge engineer specializing in information synthesis and curation.
 
 Your approach:
-1. Load and validate data
-2. Perform exploratory analysis
-3. Identify trends and anomalies
-4. Generate visualizations
-5. Provide actionable recommendations
+1. Check for uncompiled sources: read_manifest with filter "uncompiled"
+2. For each uncompiled source, read it and compile:
+   - Write a concise summary to context/wiki/summaries/
+   - Extract key concepts and write/update articles in context/wiki/concepts/
+   - Cross-reference related concepts in their frontmatter
+3. Update context/wiki/index.md with new entries (read existing, merge, write back)
+4. Mark each processed source as compiled
+5. Save any discoveries or patterns to learnings
+6. Call finish_task with a summary of what was compiled
+
+When answering questions:
+1. Read context/wiki/index.md first — scan for relevant articles
+2. Read only the articles that match — do not scan every file
+3. If the index has no match, use search_context as a fallback
+4. Synthesize an answer from the retrieved articles, citing sources
+
+Output format:
+- Wiki articles as markdown with YAML frontmatter
+- Save all artifacts under context/
+- Call finish_task with a summary of what was compiled and learned
 
 Focus on:
-- Statistical significance
-- Data quality issues
-- Clear visualizations
-- Business impact
-
-Save all outputs as structured reports with charts.
-
-Available tools: ${Object.keys(ToolRegistry).join(', ')}
+- Accurate synthesis — never fabricate facts not in the sources
+- Cross-referencing — link related concepts to build a connected wiki
+- Incremental growth — each run should leave the wiki richer than before
+- Index maintenance — the index is the routing layer, keep it current
 `;
 ```
 
-## Provider Usage Examples
-
-### Local (Ollama default)
-```bash
-node agent.js "Summarize this repo's purpose" --yolo
-# Or explicit model prefix for Ollama
-node agent.js "Write a plan for the agent" --model ollama:gpt-oss --yolo
-```
-
-### OpenAI
-```bash
-export OPENAI_API_KEY=sk-...
-node agent.js "Draft a product brief" --model openai:gpt-5-mini --yolo
-# Or prompt and save to .env
-node agent.js "Draft a product brief" --provider openai --model gpt-5-mini --save-keys --yolo
-```
-
-### Anthropic
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-node agent.js "Create a lightweight research report" --model anthropic:claude-sonnet-4-5 --yolo
-```
-
-### Gemini
-```bash
-export GEMINI_API_KEY=google-...
-node agent.js "Outline a blog about vector DBs" --model gemini:gemini-2.5-flash --yolo
-```
-
-## How the Agent Chooses a Provider
-- Best default: Ollama — zero cost and on‑device by default
-- Explicit control: prefer `--provider` or model prefixes
-- Light inference: obvious model names route to vendor; otherwise Ollama
-
-## UX & Safety Notes
-- Key prompting is TTY‑only; in CI/containers use env vars or pass `--*-key`
-- `--save-keys` writes to local `.env` in the working directory — do not commit secrets
-- Providers return a unified shape: `{ content, done }`
-
-## Checklist for Agent Creation
-
-- [ ] Identified agent purpose and domain
-- [ ] Implemented necessary tools
-- [ ] Added tool validation and error handling
-- [ ] Customized agent instructions
-- [ ] Included tool usage examples in instructions
-- [ ] Defined output format expectations
-- [ ] Tested with sample tasks
-- [ ] Verified error handling works
-- [ ] Ensured outputs are concise and useful
-- [ ] Added any domain-specific logic
-
-## Remember
-
-1. **Start Simple**: Implement basic tools first, add complexity gradually
-2. **Test Iteratively**: Test each tool as you build it
-3. **User Focus**: Always consider what the end user needs
-4. **Safety First**: The --yolo flag exists for a reason
-5. **Be Helpful**: If a tool doesn't exist, create it with define_tool
-
-When complete, the agent should be a self-contained, single-file solution that can be run immediately with:
+## Testing
 
 ```bash
-node agent.js "User's task" --yolo
+node agent.js "Your test task"                              # 1. Preview planned tool calls
+node agent.js "Write a hello world file" --yolo             # 2. Simple task, verify execution
+node agent.js "Research AI trends and create a report" --yolo  # 3. Complex workflow
 ```
 
-### Tool Discovery
-List all tools: `<<tool:help {}>>`
-See one tool’s signature & example payload: `<<tool:help {"tool":"read_file"}>>`
+Always test in preview mode first, then with `--yolo`.
+
+## Model Selection
+
+Browse all available models: https://ollama.com/library (or API: `https://ollama.com/api/tags`)
+
+Before creating an agent, check what's installed and what the system can run:
+
+```bash
+ollama list                                        # installed models
+system_profiler SPHardwareDataType | grep Memory   # macOS — check RAM
+free -h                                            # Linux — check RAM
+wmic OS get TotalVisibleMemorySize                 # Windows — check RAM
+```
+
+### Pick a model that fits the machine
+
+Rule of thumb: model file size should be ≤ 75% of available RAM (the OS and Ollama need the rest).
+
+| System RAM | Max model size | Good picks |
+|---|---|---|
+| 8GB | ~3-4GB (~4B params) | `gemma3:4b`, `phi4-mini`, `ministral-3:3b` |
+| 16GB | ~6-10GB (~9B params) | `qwen3.5:9b`, `gemma3:12b`, `ministral-3:8b` |
+| 32GB | ~14-20GB (~27B params) | `mistral-small`, `gemma3:27b`, `devstral-small-2:24b`, `deepseek-r1:14b` |
+| 64GB+ | ~40-65GB (~70B+ params) | `qwen3-coder-next`, `deepseek-v3.1`, `mistral-large-3` |
+
+### Match model to agent type
+
+| Agent type | Recommended models | Why |
+|---|---|---|
+| **Code analysis / generation** | `qwen3-coder`, `devstral-small-2`, `gpt-oss`, `deepseek-r1` | Code-trained, follow structured tool-call patterns well |
+| **Research / summarization** | `mistral-small`, `gemma3`, `qwen3.5` | Strong reasoning and synthesis |
+| **Reasoning / multi-step** | `deepseek-r1`, `cogito`, `qwen3.5` | Chain-of-thought, planning |
+| **Data / structured output** | `qwen3.5`, `mistral-small`, `nemotron-3-nano` | Reliable JSON/table output |
+| **Vision / multimodal** | `gemma3` (with vision), `qwen3-vl` | Can process images |
+| **General purpose** | `mistral-small` (default), `gemma3` | Balanced across tasks |
+
+### Install a model
+
+```bash
+ollama pull mistral-small      # default — good all-rounder (14GB, needs 32GB RAM)
+ollama pull qwen3.5:9b         # smaller — fits 16GB RAM
+ollama pull gemma3:4b          # smallest — fits 8GB RAM
+```
+
+When recommending a model in the agent's docs, always state the model name, file size, and minimum RAM so users know if it'll run on their machine.
+
+## Provider Quick Reference
+
+| Prefix | Example | Key source |
+|---|---|---|
+| (none) | `--model mistral-small` | Ollama (default, free, local) |
+| `ollama:` | `--model ollama:deepseek-r1` | Ollama |
+| `openai:` | `--model openai:gpt-5-mini` | `OPENAI_API_KEY` / `--openai-key` |
+| `anthropic:` | `--model anthropic:claude-sonnet-4-5` | `ANTHROPIC_API_KEY` / `--anthropic-key` |
+| `gemini:` | `--model gemini:gemini-2.5-flash` | `GEMINI_API_KEY` / `--gemini-key` |
+
+Model-name inference: `gpt-*` → OpenAI, `claude-*` → Anthropic, `gemini-*` → Google. Everything else → Ollama.
+
+## Checklist
+
+- [ ] Copied stub (never edited `agent.stub` directly)
+- [ ] Scaffold fully filled — no `[BRACKETED]` placeholders remain
+- [ ] `defaultTask` set in CONFIG so `node <name>.js --yolo` works without a task argument
+- [ ] Expert persona is specific, not generic
+- [ ] System prompt covers: boundaries, methodology, edge cases, self-verification, fallbacks, output contract
+- [ ] Domain tools implemented with validation and error handling
+- [ ] Tested in preview mode, then with `--yolo`
+- [ ] Agent definition JSON produced (identifier + whenToUse + systemPrompt)
+- [ ] *(Knowledge agents)* `context/` directory convention documented in system prompt
+- [ ] *(Knowledge agents)* Compilation loop encoded in agent's approach steps
+
+## Tool Discovery
+
+Built-in tools are documented in the stub. From inside a running agent:
+- `<<tool:help {}>>` — list all tools
+- `<<tool:help {"tool":"write_file"}>>` — show one tool's signature and example

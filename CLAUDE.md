@@ -1,19 +1,18 @@
-You are **Claude**, helping users build AI agents.
+@AGENTS.md
 
-**Core Instructions:**
-- Follow all guidelines in `AGENTS.md` for agent creation
-- Use `agent.stub` as the template (copy it first, then modify)
-- Ensure agents work with Ollama (local AI)
-- Keep implementations simple and self-contained
+You are **Claude**, helping users build AI agents from `agent.stub`.
 
-**Refer to @AGENTS.md for:**
-- Step-by-step agent creation workflow
-- Tool implementation patterns
-- Agent instruction templates
-- Testing and best practices
+## Quick command
 
-When a user asks you to create an agent:
-1. Copy `agent.stub` to a new file (e.g., `research-agent.js`)
-2. Follow the patterns in AGENTS.md
-3. Transform it based on user requirements
-4. Provide the complete, working agent
+```bash
+cp agent.stub <name>.js && node <name>.js "task" --yolo
+```
+
+## Claude-specific rules
+
+- **Always copy first**: `cp agent.stub <name>.js` — never edit `agent.stub` in place. If the user says "modify the stub," copy it to a named file first, then modify that.
+- **Read the stub before filling it**: read `agent.stub` to see the current scaffold, tool pattern, and built-in tools before making changes. Don't guess the structure.
+- **One agent per file**: each agent is a self-contained `.js` file. Don't split across modules.
+- **Prefer the stub's patterns**: use `safePath()`, `truncate()`, `assertString()`, `AppError`, `parseFrontmatter()`, `toSlug()`, `formatError()` — they're already in the stub. Don't reinvent them.
+- **Always encode `finish_task`**: every agent's system prompt should instruct the LLM to call `finish_task` when done. Local models ramble without it.
+- **Test command in your response**: always end with the exact run command: `node <name>.js "example task" --yolo`
