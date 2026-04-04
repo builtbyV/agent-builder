@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- SEO Meta Tags -->
+  <title>Agent Builder — Build AI Agents by Just Talking to AI</title>
+  <meta name="description" content="A local-first agent harness. One file, 18 built-in tools, subagent decomposition, zero npm dependencies. Describe what you want — AI builds it.">
+  <meta name="robots" content="index, follow">
+  <meta name="author" content="Agent Builder">
+  <meta name="theme-color" content="#0f172a">
+
+  <!-- Open Graph Meta Tags -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Agent Builder">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:url" content="https://oss.v.ee/agent-builder/">
+  <meta property="og:title" content="Agent Builder — Build AI Agents by Just Talking to AI">
+  <meta property="og:description" content="A local-first agent harness. One file, 18 built-in tools, subagent decomposition, zero npm dependencies.">
+  <meta property="og:image" content="https://oss.v.ee/agent-builder/images/agent-builder.png">
+  <meta property="og:image:alt" content="Agent Builder — local-first agent harness preview">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <!-- Twitter Meta Tags -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Agent Builder — Build AI Agents by Just Talking to AI">
+  <meta name="twitter:description" content="A local-first agent harness. One file, 18 built-in tools, subagent decomposition, zero npm dependencies.">
+  <meta name="twitter:image" content="https://oss.v.ee/agent-builder/images/agent-builder.png">
+
+  <!-- Favicon -->
+  <link rel="icon" href="favicon.ico">
+
+  <!-- Tailwind UI Elements (for modal) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindplus/elements@1" type="module"></script>
+
+  <!-- JSON-LD: SoftwareApplication schema -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Agent Builder",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "Cross-platform",
+    "description": "A local-first agent harness for building AI agents. 18 built-in tools, subagent spawning, knowledge systems. Zero npm dependencies.",
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD"
+    },
+    "sameAs": [
+      "https://github.com/builtbyV/agent-builder"
+    ]
+  }
+  </script>
+  <script type="module" crossorigin src="/agent-builder/assets/index-qwI_H2Pj.js"></script>
+  <link rel="stylesheet" crossorigin href="/agent-builder/assets/index-BVx7M2rX.css">
+</head>
+<body class="flex h-full flex-col bg-white antialiased text-slate-800">
+
+  <main class="flex-auto">
+
+    <!-- Hero Section -->
+    <section class="relative overflow-hidden py-20 sm:py-32">
+      <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="max-w-3xl mx-auto text-center">
+          <h1 class="mt-4 font-display text-5xl sm:text-6xl md:text-7xl leading-tight tracking-tight text-slate-900 font-bold">Build AI Agents by Just Talking to AI</h1>
+          <p class="mt-6 text-xl sm:text-2xl leading-relaxed text-slate-700">
+            One file. 18 tools. Zero dependencies. Describe what you need, your AI assistant builds it, and the harness runs it — locally, for free.
+          </p>
+          <div class="mt-10 flex flex-col items-center justify-center gap-3">
+            <button command="show-modal" commandfor="quick-setup" type="button" class="cursor-pointer rounded-full bg-slate-900 px-7 py-3.5 text-base font-semibold text-white hover:bg-slate-800 shadow-sm hover:shadow-md transition">Start Building Free →</button>
+            <div class="text-center">
+              <p class="text-sm text-slate-600">Setup takes 5 minutes • Runs fully offline with Ollama</p>
+              <p class="text-xs text-slate-500 mt-1">No coding required • No npm install • You own your code</p>
+            </div>
+          </div>
+          <p class="mt-2 text-center text-sm">
+            <a href="#compare" class="text-slate-600 underline decoration-slate-300 hover:text-slate-900 hover:decoration-slate-400">See how it compares</a>
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Features Journey -->
+    <section id="features" class="py-20 sm:py-32 bg-slate-50">
+      <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="mx-auto max-w-3xl text-center">
+          <h2 class="font-display text-4xl sm:text-5xl tracking-tight text-slate-900 font-semibold">From Idea to Running Agent</h2>
+          <p class="mt-4 text-xl sm:text-2xl leading-relaxed text-slate-700">No frameworks to learn. No dependencies to manage. Just say what you want.</p>
+        </div>
+
+        <div class="mx-auto mt-16 max-w-3xl">
+          <ol class="space-y-8 sm:space-y-10">
+            <li class="grid grid-cols-[auto,1fr] items-start gap-4">
+              <div class="mt-1 flex h-8 w-8 items-center justify-center rounded-full bg-slate-900 text-white text-sm font-semibold">1</div>
+              <div>
+                <h3 class="text-2xl font-semibold leading-snug text-slate-900">No more framework churn and dependency hell</h3>
+                <p class="mt-2 text-slate-700">No LangChain. No pip install. No node_modules. A single .js file with everything an agent needs to do real work.</p>
+              </div>
+            </li>
+            <li class="grid grid-cols-[auto,1fr] items-start gap-4">
+              <div class="mt-1 flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-white text-sm font-semibold">2</div>
+              <div>
+                <h3 class="text-2xl font-semibold leading-snug text-slate-900">Describe your agent in plain language</h3>
+                <p class="mt-2 text-slate-700">"Build a research agent that searches the web, cross-references sources, and writes reports." Your AI assistant handles the rest.</p>
+              </div>
+            </li>
+            <li class="grid grid-cols-[auto,1fr] items-start gap-4">
+              <div class="mt-1 flex h-8 w-8 items-center justify-center rounded-full bg-emerald-600 text-white text-sm font-semibold">3</div>
+              <div>
+                <h3 class="text-2xl font-semibold leading-snug text-slate-900">Preview every action before it runs</h3>
+                <p class="mt-2 text-slate-700">See exactly which tools your agent will call. Add <code class="bg-slate-100 px-1.5 py-0.5 rounded text-sm">--yolo</code> when you trust it to run for real.</p>
+              </div>
+            </li>
+            <li class="grid grid-cols-[auto,1fr] items-start gap-4">
+              <div class="mt-1 flex h-8 w-8 items-center justify-center rounded-full bg-purple-600 text-white text-sm font-semibold">4</div>
+              <div>
+                <h3 class="text-2xl font-semibold leading-snug text-slate-900">Runs locally. Free forever.</h3>
+                <p class="mt-2 text-slate-700">Powered by Ollama — your data never leaves your machine. Or connect OpenAI, Anthropic, or Google when you need cloud models.</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <!-- Harness Capabilities -->
+    <section class="py-20">
+      <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="mx-auto max-w-3xl text-center">
+          <h2 class="font-display text-4xl sm:text-5xl tracking-tight text-slate-900 font-semibold">Not a Template. A Harness.</h2>
+          <p class="mt-4 text-lg sm:text-xl leading-relaxed text-slate-700">A complete runtime that handles tool dispatch, turn management, context compression, and safety — so your agent focuses on the task.</p>
+        </div>
+        <div class="mx-auto mt-12 grid max-w-5xl grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+          <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center">
+                <svg class="w-6 h-6 text-slate-900" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                  <path d="M4 6h16M4 12h16M4 18h8" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <h3 class="text-lg font-semibold text-slate-900">18 Built-in Tools</h3>
+            </div>
+            <p class="mt-3 text-sm text-slate-700">Files, web search, scraping, downloads, knowledge base, orchestration. Plus agents create new tools at runtime.</p>
+          </div>
+          <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center">
+                <svg class="w-6 h-6 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                  <circle cx="12" cy="8" r="3"/>
+                  <circle cx="6" cy="18" r="2.5"/>
+                  <circle cx="18" cy="18" r="2.5"/>
+                  <path d="M12 11v3M9 15l-2 1.5M15 15l2 1.5" stroke-linecap="round"/>
+                </svg>
+              </div>
+              <h3 class="text-lg font-semibold text-slate-900">Subagent Spawning</h3>
+            </div>
+            <p class="mt-3 text-sm text-slate-700">Big tasks decompose into focused subtasks. Each subagent gets a fresh context window — critical for local models with limited memory.</p>
+          </div>
+          <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center">
+                <svg class="w-6 h-6 text-emerald-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                  <path d="M12 6.5v4l3 1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  <circle cx="12" cy="12" r="9"/>
+                </svg>
+              </div>
+              <h3 class="text-lg font-semibold text-slate-900">Knowledge System</h3>
+            </div>
+            <p class="mt-3 text-sm text-slate-700">Ingest articles, compile a wiki, search with rg/grep. Every interaction makes the knowledge base richer. Pure markdown, no database.</p>
+          </div>
+          <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center">
+                <svg class="w-6 h-6 text-purple-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                  <path d="M13 10V3L4 14h7v7l9-11h-7z" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <h3 class="text-lg font-semibold text-slate-900">Smart Runtime</h3>
+            </div>
+            <p class="mt-3 text-sm text-slate-700">Context compression, parallel tool execution, turn-aware prompting, error recovery with actionable hints. Optimized for local models.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Choose Your AI Assistant -->
+    <section class="py-20">
+      <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="mx-auto max-w-3xl text-center">
+          <h2 class="font-display text-4xl sm:text-5xl tracking-tight text-slate-900 font-semibold">Choose Your AI Assistant</h2>
+          <p class="mt-4 text-lg sm:text-xl leading-relaxed text-slate-700">Any of these can build your agent. Pick one and start talking.</p>
+        </div>
+        <div class="mx-auto mt-12 grid max-w-5xl grid-cols-1 gap-6 sm:grid-cols-3">
+          <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+            <h3 class="text-lg font-semibold text-slate-900">Claude Code</h3>
+            <p class="mt-2 text-sm text-slate-700">Anthropic's agentic coding tool. Strong natural-language understanding and multi-file edits. Also runs fully offline through Ollama.</p>
+          </div>
+          <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+            <h3 class="text-lg font-semibold text-slate-900">OpenAI Codex CLI</h3>
+            <p class="mt-2 text-sm text-slate-700">Fast, capable completions. Great all-rounder. Requires OpenAI API key or Plus subscription.</p>
+          </div>
+          <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+            <h3 class="text-lg font-semibold text-slate-900">Google Gemini CLI</h3>
+            <p class="mt-2 text-sm text-slate-700">Generous free tier — 60 requests/min, 1,000/day. Just sign in with your Google account.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Fully Offline -->
+    <section class="py-20 bg-slate-50">
+      <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="mx-auto max-w-3xl text-center">
+          <h2 class="font-display text-4xl sm:text-5xl tracking-tight text-slate-900 font-semibold">Fully Offline. Everything Local.</h2>
+          <p class="mt-4 text-lg sm:text-xl leading-relaxed text-slate-700">Run Claude Code itself through Ollama — both the AI assistant that builds your agents and the agents themselves stay on your machine. No API keys. No cloud. No data leaving your network.</p>
+        </div>
+        <div class="mx-auto mt-10 max-w-2xl">
+          <pre class="overflow-x-auto rounded-2xl bg-slate-900 p-6 text-sm leading-relaxed text-slate-100 shadow-sm"><code># Quick setup — launches Claude Code with a local model
+ollama launch claude
+
+# Or pick a specific model
+ollama launch claude --model qwen3.5</code></pre>
+          <div class="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div class="rounded-xl bg-white p-4 ring-1 ring-slate-200 text-center">
+              <p class="text-sm font-semibold text-slate-900">16GB RAM</p>
+              <p class="mt-1 text-xs text-slate-600">qwen3.5, glm-4.7-flash</p>
+            </div>
+            <div class="rounded-xl bg-white p-4 ring-1 ring-slate-200 text-center">
+              <p class="text-sm font-semibold text-slate-900">32GB RAM</p>
+              <p class="mt-1 text-xs text-slate-600">kimi-k2.5:cloud, glm-5:cloud</p>
+            </div>
+            <div class="rounded-xl bg-white p-4 ring-1 ring-slate-200 text-center">
+              <p class="text-sm font-semibold text-slate-900">64GB+ RAM</p>
+              <p class="mt-1 text-xs text-slate-600">minimax-m2.7, qwen3-coder-next, gemma4</p>
+            </div>
+          </div>
+          <p class="mt-4 text-center text-sm text-slate-600">More models at <a href="https://ollama.com/search?c=cloud" class="underline hover:no-underline">ollama.com/search</a>. Claude Code needs 64k+ context — see <a href="https://docs.ollama.com/context-length" class="underline hover:no-underline">Ollama docs</a> to adjust.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Call to Action -->
+    <section class="bg-slate-900 py-16">
+      <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="mx-auto max-w-2xl text-center">
+          <h2 class="font-display text-4xl sm:text-5xl tracking-tight text-white font-bold">Stop Building Frameworks. Start Building Agents.</h2>
+          <p class="mt-4 text-xl sm:text-2xl leading-relaxed text-slate-300">One file. Zero dependencies. Real work.</p>
+          <button command="show-modal" commandfor="quick-setup" type="button" class="mt-8 inline-block cursor-pointer rounded-full bg-white px-7 py-3.5 text-base font-semibold text-slate-900 hover:bg-slate-100 shadow-sm hover:shadow-md transition">Get Started Free →</button>
+          <p class="mt-3 text-sm text-slate-400">Open source. MIT license. You own everything.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Compare Options -->
+    <section id="compare" class="py-20 sm:py-32">
+      <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="text-center">
+          <h2 class="font-display text-4xl sm:text-5xl tracking-tight text-slate-900 font-semibold">Why Agent Builder?</h2>
+          <p class="mt-4 text-xl sm:text-2xl leading-relaxed text-slate-700">Compare frameworks, building from scratch, and Agent Builder.</p>
+        </div>
+
+        <div class="mt-12 overflow-x-auto rounded-2xl ring-1 ring-slate-200 shadow-sm">
+          <table class="w-full text-left text-base">
+            <thead class="bg-slate-50 text-slate-700 text-sm sm:text-base">
+              <tr>
+                <th class="p-3 font-semibold">&nbsp;</th>
+                <th class="p-3 font-semibold">Frameworks</th>
+                <th class="p-3 font-semibold">From Scratch</th>
+                <th class="p-3 font-semibold">Agent Builder</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-200">
+              <tr>
+                <td class="p-3 font-medium text-slate-900">Dependencies</td>
+                <td class="p-3">50–200+ packages</td>
+                <td class="p-3">You manage everything</td>
+                <td class="p-3 font-semibold text-emerald-700">Zero npm dependencies</td>
+              </tr>
+              <tr>
+                <td class="p-3 font-medium text-slate-900">Setup time</td>
+                <td class="p-3">pip/npm install + config</td>
+                <td class="p-3">Days of scaffolding</td>
+                <td class="p-3 font-semibold text-emerald-700">5 minutes, one script</td>
+              </tr>
+              <tr>
+                <td class="p-3 font-medium text-slate-900">Learning curve</td>
+                <td class="p-3">Framework-specific APIs</td>
+                <td class="p-3">Everything from zero</td>
+                <td class="p-3 font-semibold text-emerald-700">Describe in plain language</td>
+              </tr>
+              <tr>
+                <td class="p-3 font-medium text-slate-900">Local models</td>
+                <td class="p-3">Often unsupported</td>
+                <td class="p-3">You implement it</td>
+                <td class="p-3 font-semibold text-emerald-700">Ollama by default, free</td>
+              </tr>
+              <tr>
+                <td class="p-3 font-medium text-slate-900">Codebase size</td>
+                <td class="p-3">Hundreds of files</td>
+                <td class="p-3">Grows uncontrolled</td>
+                <td class="p-3 font-semibold text-emerald-700">One .js file</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Quick Setup Modal -->
+  <el-dialog>
+    <dialog id="quick-setup" aria-labelledby="setup-title" class="fixed inset-0 m-0 size-auto max-h-none max-w-none overflow-y-auto bg-transparent p-0 backdrop:bg-transparent">
+      <el-dialog-backdrop class="fixed inset-0 bg-gray-500/75 transition-opacity data-[closed]:opacity-0 data-[enter]:duration-300 data-[leave]:duration-200 data-[enter]:ease-out data-[leave]:ease-in dark:bg-gray-900/50"></el-dialog-backdrop>
+
+      <div tabindex="0" class="flex min-h-full items-end justify-center p-4 text-center focus:outline-none sm:items-center sm:p-0">
+        <el-dialog-panel class="relative transform overflow-hidden rounded-2xl bg-white px-4 pb-4 pt-5 text-left shadow-xl transition-all data-[closed]:translate-y-4 data-[closed]:opacity-0 data-[enter]:duration-300 data-[enter]:ease-out data-[leave]:duration-200 data-[leave]:ease-in sm:my-8 sm:w-full sm:max-w-xl sm:p-6 data-[closed]:sm:translate-y-0 data-[closed]:sm:scale-95">
+          <div class="absolute right-0 top-0 hidden pr-4 pt-4 sm:block">
+            <button type="button" command="close" commandfor="quick-setup" class="cursor-pointer rounded-md bg-white text-gray-400 hover:text-gray-500 focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-slate-900">
+              <span class="sr-only">Close</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" class="size-6">
+                <path d="M6 18 18 6M6 6l12 12" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
+          </div>
+          <div class="sm:flex sm:items-start">
+            <div class="mx-auto flex size-12 shrink-0 items-center justify-center rounded-full bg-slate-100 sm:mx-0 sm:size-10">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" class="size-6 text-slate-700">
+                <path d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3M5.25 20.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </div>
+            <div class="mt-3 text-center sm:ml-4 sm:mt-0 sm:text-left">
+              <h3 id="setup-title" class="text-base font-semibold text-gray-900">Quick Setup — 5 minutes</h3>
+              <div class="mt-2">
+                <p class="text-sm text-gray-600">Three ways to start:</p>
+
+                <!-- Terminal Option -->
+                <div class="mt-4 rounded-lg bg-slate-50 p-4">
+                  <h4 class="font-semibold text-gray-900">Option 1: Terminal Setup</h4>
+                  <p class="mt-2 text-sm text-gray-700">Three commands and you're building agents:</p>
+                  <pre class="mt-2 overflow-x-auto rounded-lg bg-slate-900 p-4 text-xs leading-relaxed text-slate-100"><code>git clone https://github.com/builtbyV/agent-builder.git
+cd agent-builder
+bash setup.sh</code></pre>
+                  <p class="mt-2 text-xs text-gray-600">The setup script checks Node.js, installs Ollama, and pulls a model.</p>
+                </div>
+
+                <!-- Offline Option -->
+                <div class="mt-4 rounded-lg bg-slate-50 p-4">
+                  <h4 class="font-semibold text-gray-900">Option 2: Fully Offline with Ollama</h4>
+                  <p class="mt-2 text-sm text-gray-700">Run Claude Code itself through Ollama — everything stays on your machine:</p>
+                  <pre class="mt-2 overflow-x-auto rounded-lg bg-slate-900 p-4 text-xs leading-relaxed text-slate-100"><code>ollama launch claude --model qwen3.5</code></pre>
+                  <p class="mt-2 text-xs text-gray-600">Both the AI assistant and the agents it creates run locally.</p>
+                </div>
+
+                <!-- Cloud AI Option -->
+                <div class="mt-4">
+                  <h4 class="font-semibold text-gray-900">Option 3: Cloud AI Assistants</h4>
+                  <p class="mt-2 text-sm text-gray-700">After setup, start any AI assistant:</p>
+                  <pre class="mt-2 overflow-x-auto rounded-lg bg-slate-900 p-4 text-xs leading-relaxed text-slate-100"><code>npx claude    # Anthropic
+npx codex     # OpenAI
+npx gemini    # Google (free tier)</code></pre>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="mt-5 sm:mt-4 sm:flex sm:flex-row-reverse">
+            <a href="https://github.com/builtbyV/agent-builder" target="_blank" rel="noopener" class="inline-flex w-full justify-center cursor-pointer rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 sm:ml-3 sm:w-auto">View on GitHub</a>
+            <button type="button" command="close" commandfor="quick-setup" class="mt-3 inline-flex w-full justify-center cursor-pointer rounded-md bg-white px-4 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 sm:mt-0 sm:w-auto">Close</button>
+          </div>
+        </el-dialog-panel>
+      </div>
+    </dialog>
+  </el-dialog>
+
+  <!-- Footer -->
+  <footer class="bg-slate-50">
+    <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex flex-col items-center justify-center border-t border-slate-400/10 py-10">
+        <div class="text-center">
+          <p class="text-sm text-slate-600">Agent Builder is <a href="https://github.com/builtbyV/agent-builder" class="underline hover:no-underline">open source</a>.</p>
+          <p class="mt-1 text-xs text-slate-500">Assembled by <a href="https://v.ee" class="underline font-bold hover:no-underline">V</a> to make agent development accessible to everyone.</p>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
