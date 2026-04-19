@@ -144,7 +144,7 @@ pwd                # Check which folder you're in
 **What you get:**
 - **Zero npm dependencies** — Just Node.js and Ollama
 - **Single file** — The entire agent in one `.js` file
-- **24 built-in tools** — Files, web, search, knowledge base, orchestration, skills, MCP, sandbox
+- **25 built-in tools** — Files, web, search, knowledge base, orchestration, skills, MCP, sandbox
 - **Dynamic tools** — Agent creates tools at runtime as needed
 - **Knowledge system** — Ingest sources, compile a wiki, search with `rg`/`grep`, learnings that compound
 - **Skills (progressive disclosure)** — drop `SKILL.md` bundles into `./skills/` and the harness auto-lists them in the system prompt; bodies load on demand via `load_skill`. Compatible with `npx skills add` and the Anthropic/Vercel skill ecosystem
