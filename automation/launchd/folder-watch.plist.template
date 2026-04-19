@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Folder-watch trigger — fires whenever anything changes inside the watched path(s).
+
+  This is the "inbox pattern": something (Shortcuts, a script, the Finder drag-and-drop,
+  a file-sync tool) drops a .txt / .md file into automation/inbox/, launchd notices the
+  change, and the agent wakes up to process it.
+
+  Ideal upstream triggers for this plist:
+    - Apple Shortcuts: "Append text to file" action pointed at automation/inbox/msg.txt.
+      Bind the Shortcut to Siri ("Hey Siri, brief me"), NFC, Focus mode, or the
+      Automation tab to fire when a message from a specific contact arrives.
+    - Finder drag-and-drop: the user drops a file into automation/inbox/.
+    - A cron-triggered script: curl/email puller writes to automation/inbox/.
+
+  The invoke-agent.sh lock prevents overlapping runs, so rapid-fire file drops are safe.
+
+  Install / remove: same as timer.plist.template.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ee.agent-builder.__NAME__</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO_ABS_PATH__/automation/invoke-agent.sh</string>
+    <string>__AGENT_FILE__</string>
+    <string>--yolo</string>
+  </array>
+
+  <!-- launchd fires when ANY change happens inside these paths.
+       Point at automation/inbox/. Add more entries to watch additional drop zones. -->
+  <key>WatchPaths</key>
+  <array>
+    <string>__REPO_ABS_PATH__/automation/inbox</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__REPO_ABS_PATH__/automation/logs/__NAME__.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO_ABS_PATH__/automation/logs/__NAME__.stderr.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <!-- Coalesce rapid-fire file events. launchd debounces WatchPaths naturally too. -->
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+</dict>
+</plist>

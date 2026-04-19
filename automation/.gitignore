@@ -1,0 +1,14 @@
+# Runtime artifacts — keep dirs (via .gitkeep) but ignore contents.
+.locks/
+logs/*
+!logs/.gitkeep
+inbox/*
+!inbox/.gitkeep
+inbox/.processed/
+outbox/*
+!outbox/.gitkeep
+
+# User-generated plists (each user installs their own with absolute paths).
+# Ship templates only.
+launchd/*.plist
+!launchd/*.plist.template

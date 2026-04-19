@@ -6,7 +6,7 @@
 
   <!-- SEO Meta Tags -->
   <title>Agent Builder — Build AI Agents by Just Talking to AI</title>
-  <meta name="description" content="A local-first agent harness. One file, 18 built-in tools, subagent decomposition, zero npm dependencies. Describe what you want — AI builds it.">
+  <meta name="description" content="A local-first agent harness. One file, 24+ built-in tools, skills, MCP support, container sandbox. Zero npm dependencies. Describe what you want — AI builds it.">
   <meta name="robots" content="index, follow">
   <meta name="author" content="Agent Builder">
   <meta name="theme-color" content="#0f172a">
@@ -17,7 +17,7 @@
   <meta property="og:locale" content="en_US">
   <meta property="og:url" content="https://oss.v.ee/agent-builder/">
   <meta property="og:title" content="Agent Builder — Build AI Agents by Just Talking to AI">
-  <meta property="og:description" content="A local-first agent harness. One file, 18 built-in tools, subagent decomposition, zero npm dependencies.">
+  <meta property="og:description" content="A local-first agent harness. One file, 24+ built-in tools, skills, MCP support, container sandbox. Zero npm dependencies.">
   <meta property="og:image" content="https://oss.v.ee/agent-builder/images/agent-builder.png">
   <meta property="og:image:alt" content="Agent Builder — local-first agent harness preview">
   <meta property="og:image:width" content="1200">
@@ -26,7 +26,7 @@
   <!-- Twitter Meta Tags -->
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Agent Builder — Build AI Agents by Just Talking to AI">
-  <meta name="twitter:description" content="A local-first agent harness. One file, 18 built-in tools, subagent decomposition, zero npm dependencies.">
+  <meta name="twitter:description" content="A local-first agent harness. One file, 24+ built-in tools, skills, MCP support, container sandbox. Zero npm dependencies.">
   <meta name="twitter:image" content="https://oss.v.ee/agent-builder/images/agent-builder.png">
 
   <!-- Favicon -->
@@ -43,7 +43,7 @@
     "name": "Agent Builder",
     "applicationCategory": "DeveloperApplication",
     "operatingSystem": "Cross-platform",
-    "description": "A local-first agent harness for building AI agents. 18 built-in tools, subagent spawning, knowledge systems. Zero npm dependencies.",
+    "description": "A local-first agent harness for building AI agents. 24+ built-in tools, skills with progressive disclosure, MCP (Model Context Protocol) client, container sandbox, subagent spawning, knowledge systems. Zero npm dependencies.",
     "offers": {
       "@type": "Offer",
       "price": "0",
@@ -54,8 +54,9 @@
     ]
   }
   </script>
-  <script type="module" crossorigin src="/agent-builder/assets/index-qwI_H2Pj.js"></script>
-  <link rel="stylesheet" crossorigin href="/agent-builder/assets/index-BVx7M2rX.css">
+  
+  <script type="module" crossorigin src="/agent-builder/assets/index-DLuJIbR5.js"></script>
+  <link rel="stylesheet" crossorigin href="/agent-builder/assets/index-Dw63RQny.css">
 </head>
 <body class="flex h-full flex-col bg-white antialiased text-slate-800">
 
@@ -67,7 +68,7 @@
         <div class="max-w-3xl mx-auto text-center">
           <h1 class="mt-4 font-display text-5xl sm:text-6xl md:text-7xl leading-tight tracking-tight text-slate-900 font-bold">Build AI Agents by Just Talking to AI</h1>
           <p class="mt-6 text-xl sm:text-2xl leading-relaxed text-slate-700">
-            One file. 18 tools. Zero dependencies. Describe what you need, your AI assistant builds it, and the harness runs it — locally, for free.
+            One file. 24+ tools. Skills, MCP, and a container sandbox built in. Zero dependencies. Describe what you need, your AI assistant builds it, and the harness runs it — locally, for free.
           </p>
           <div class="mt-10 flex flex-col items-center justify-center gap-3">
             <button command="show-modal" commandfor="quick-setup" type="button" class="cursor-pointer rounded-full bg-slate-900 px-7 py-3.5 text-base font-semibold text-white hover:bg-slate-800 shadow-sm hover:shadow-md transition">Start Building Free →</button>
@@ -133,7 +134,7 @@
           <h2 class="font-display text-4xl sm:text-5xl tracking-tight text-slate-900 font-semibold">Not a Template. A Harness.</h2>
           <p class="mt-4 text-lg sm:text-xl leading-relaxed text-slate-700">A complete runtime that handles tool dispatch, turn management, context compression, and safety — so your agent focuses on the task.</p>
         </div>
-        <div class="mx-auto mt-12 grid max-w-5xl grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+        <div class="mx-auto mt-12 grid max-w-6xl grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
           <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
             <div class="flex items-center gap-3">
               <div class="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center">
@@ -141,7 +142,7 @@
                   <path d="M4 6h16M4 12h16M4 18h8" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </div>
-              <h3 class="text-lg font-semibold text-slate-900">18 Built-in Tools</h3>
+              <h3 class="text-lg font-semibold text-slate-900">24+ Built-in Tools</h3>
             </div>
             <p class="mt-3 text-sm text-slate-700">Files, web search, scraping, downloads, knowledge base, orchestration. Plus agents create new tools at runtime.</p>
           </div>
@@ -173,14 +174,39 @@
           </div>
           <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
             <div class="flex items-center gap-3">
-              <div class="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center">
-                <svg class="w-6 h-6 text-purple-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-                  <path d="M13 10V3L4 14h7v7l9-11h-7z" stroke-linecap="round" stroke-linejoin="round"/>
+              <div class="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center">
+                <svg class="w-6 h-6 text-amber-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                  <path d="M12 15l-3-3h2V7h2v5h2l-3 3z" stroke-linecap="round" stroke-linejoin="round"/>
+                  <rect x="4" y="4" width="16" height="16" rx="2.5" ry="2.5"/>
                 </svg>
               </div>
-              <h3 class="text-lg font-semibold text-slate-900">Smart Runtime</h3>
+              <h3 class="text-lg font-semibold text-slate-900">Skills</h3>
             </div>
-            <p class="mt-3 text-sm text-slate-700">Context compression, parallel tool execution, turn-aware prompting, error recovery with actionable hints. Optimized for local models.</p>
+            <p class="mt-3 text-sm text-slate-700">Teach agents a new domain with a SKILL.md bundle. Drop one into <code class="bg-slate-100 px-1 rounded text-xs">./skills/</code> and the agent opens it only when needed. Works with the Anthropic &amp; Vercel skill ecosystems.</p>
+          </div>
+          <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-xl bg-indigo-100 flex items-center justify-center">
+                <svg class="w-6 h-6 text-indigo-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                  <path d="M8 7h8M8 12h8M8 17h5" stroke-linecap="round"/>
+                  <path d="M4 5a2 2 0 012-2h9l5 5v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5z" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <h3 class="text-lg font-semibold text-slate-900">Connect Any Service (MCP)</h3>
+            </div>
+            <p class="mt-3 text-sm text-slate-700">Drop a <code class="bg-slate-100 px-1 rounded text-xs">mcp.json</code> and your agent can use GitHub, Postgres, Slack, filesystem — the whole Model Context Protocol ecosystem. Servers appear as tools automatically.</p>
+          </div>
+          <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-xl bg-rose-100 flex items-center justify-center">
+                <svg class="w-6 h-6 text-rose-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                  <path d="M12 3l8 4v5c0 4.5-3.2 8.3-8 9-4.8-.7-8-4.5-8-9V7l8-4z" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M9.5 12l1.75 1.75L15 10" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <h3 class="text-lg font-semibold text-slate-900">Safe by Default</h3>
+            </div>
+            <p class="mt-3 text-sm text-slate-700">Network allowlist on HTTP tools, container sandbox for untrusted shells, workspace-confined file ops, preview-before-execute. Safety isn't bolted on — it's the default.</p>
           </div>
         </div>
       </div>
@@ -302,6 +328,18 @@ ollama launch claude --model qwen3.5</code></pre>
                 <td class="p-3">Hundreds of files</td>
                 <td class="p-3">Grows uncontrolled</td>
                 <td class="p-3 font-semibold text-emerald-700">One .js file</td>
+              </tr>
+              <tr>
+                <td class="p-3 font-medium text-slate-900">Skills &amp; MCP</td>
+                <td class="p-3">Framework-specific plugins</td>
+                <td class="p-3">You build the loader</td>
+                <td class="p-3 font-semibold text-emerald-700">Drop-in SKILL.md &amp; mcp.json</td>
+              </tr>
+              <tr>
+                <td class="p-3 font-medium text-slate-900">Sandboxing</td>
+                <td class="p-3">External wrappers needed</td>
+                <td class="p-3">Roll your own</td>
+                <td class="p-3 font-semibold text-emerald-700">Apple container or Docker, built in</td>
               </tr>
             </tbody>
           </table>

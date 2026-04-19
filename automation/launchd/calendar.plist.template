@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Calendar-based trigger — fires at a specific time. Uses local machine timezone.
+
+  Common patterns (omit a key to leave that dimension free):
+    Daily at 09:00         Hour=9, Minute=0
+    Weekday mornings       Hour=9, Minute=0, Weekday=1..5 (0=Sun, 1=Mon, ..., 6=Sat)
+    Weekly Sunday 18:00    Hour=18, Minute=0, Weekday=0
+    Monthly 1st at 08:30   Day=1, Hour=8, Minute=30
+
+  For multiple fire times in one day, use an array of dicts under StartCalendarInterval.
+
+  Install / remove: same as timer.plist.template.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ee.agent-builder.__NAME__</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO_ABS_PATH__/automation/invoke-agent.sh</string>
+    <string>__AGENT_FILE__</string>
+    <string>__TASK__</string>
+    <string>--yolo</string>
+  </array>
+
+  <!-- Edit Hour/Minute below. Defaults to 09:00 daily. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+    <!-- Uncomment and adjust as needed:
+    <key>Weekday</key>
+    <integer>1</integer>
+    <key>Day</key>
+    <integer>1</integer>
+    -->
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__REPO_ABS_PATH__/automation/logs/__NAME__.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO_ABS_PATH__/automation/logs/__NAME__.stderr.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

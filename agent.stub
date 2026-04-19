@@ -28,6 +28,28 @@ const CONFIG = {
   // If set, users can run `node agent.js --yolo` without a task argument.
   // Users can still override: `node agent.js "custom task" --yolo`
   defaultTask: '',
+  // Skill registry — workspace-relative dir scanned for SKILL.md bundles (Anthropic-style skills).
+  // Each ./<skillsDir>/<name>/SKILL.md with YAML frontmatter {name, description} becomes a skill
+  // the agent can discover (list_skills) and open on demand (load_skill). Progressive disclosure:
+  // only name+description load at turn 1; the body loads only when the agent opens a skill.
+  skillsDir: 'skills',
+  // Network allowlist — hosts the HTTP tools are permitted to fetch from.
+  // Each entry is a bare host (`example.com`) or a wildcard subdomain (`*.example.com`).
+  // Empty array = allow all (permissive; intentional for backward compatibility).
+  // Extend at runtime with --allow-host <host> (repeatable) or AGENT_BUILDER_ALLOW_HOSTS
+  // (comma-separated env var). See AGENTS.md for domains commonly added per-agent type.
+  networkAllowlist: [
+    'duckduckgo.com',
+    'html.duckduckgo.com',
+  ],
+  // MCP (Model Context Protocol) servers. Each entry is `{ command, args?, env? }`; the
+  // harness spawns the server as a child process at startup and exposes each of its tools
+  // as `<serverKey>_<toolName>`. Leave empty to auto-load from ./mcp.json in the cwd if
+  // present. See AGENTS.md for examples (filesystem, github, slack, etc.).
+  mcpServers: {},
+  // Timeouts for MCP operations (ms). Handshake should be quick; tool calls can be longer.
+  mcpConnectTimeoutMs: 15_000,
+  mcpCallTimeoutMs: 60_000,
 };
 
 // Small helpers to render tool lists for instructions
@@ -46,7 +68,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const readline = require('readline');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 
 const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
 const level = LOG_LEVELS[CONFIG.logLevel] ?? LOG_LEVELS.info;
@@ -158,6 +180,28 @@ function safePath(baseDir, targetPath) {
 
 // Truncate long outputs to avoid context explosion
 // hint: optional suggestion shown to the model when output is truncated
+// Enforce CONFIG.networkAllowlist on URLs passed to HTTP tools. Empty allowlist = allow all.
+// Throws an AppError with SECURITY code when blocked, pointing at the unblock flag.
+function checkUrlAllowed(url) {
+  if (!CONFIG.networkAllowlist.length) return;
+  let host;
+  try { host = new URL(url).hostname; }
+  catch { throw new AppError(`Invalid URL: ${url}`, 'VALIDATION'); }
+  for (const entry of CONFIG.networkAllowlist) {
+    if (entry.startsWith('*.')) {
+      const suffix = entry.slice(2);
+      if (host === suffix || host.endsWith('.' + suffix)) return;
+    } else if (host === entry) {
+      return;
+    }
+  }
+  throw new AppError(
+    `Network access blocked: ${host} is not in the allowlist (${CONFIG.networkAllowlist.join(', ')}). ` +
+    `Add it with --allow-host ${host} or set AGENT_BUILDER_ALLOW_HOSTS.`,
+    'SECURITY'
+  );
+}
+
 function truncate(text, maxChars = CONFIG.maxToolOutputChars, hint = '') {
   const str = String(text || '');
   if (str.length > maxChars) {
@@ -189,6 +233,50 @@ function parseFrontmatter(text) {
     meta[m[1]] = val;
   }
   return { meta, body: match[2] };
+}
+
+// Path to the standard well-known skills index (RFC 8615 + agentskills.io v0.2.0).
+const WELL_KNOWN_SKILLS_PATH = '/.well-known/agent-skills/index.json';
+
+// Subdir under CONFIG.skillsDir where extract_skill writes drafts. Visible (no leading dot) so
+// non-technical users can browse ./skills/drafts/ in Finder or a plain `ls`, but excluded from
+// discoverLocalSkills so drafts do not pollute the turn-1 system prompt until promoted.
+const SKILL_DRAFTS_DIRNAME = 'drafts';
+
+// Scan ./<skillsDir>/*/SKILL.md and return {name, description, dir} entries.
+// Safe to call when the directory is missing — returns [].
+function discoverLocalSkills(cwd) {
+  const root = path.join(cwd, CONFIG.skillsDir);
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+  catch { return []; }
+
+  const skills = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === SKILL_DRAFTS_DIRNAME) continue;
+    const skillPath = path.join(root, entry.name, 'SKILL.md');
+    let raw;
+    try { raw = fs.readFileSync(skillPath, 'utf8'); }
+    catch { continue; }
+    const { meta } = parseFrontmatter(raw);
+    const name = typeof meta.name === 'string' ? meta.name : entry.name;
+    const description = typeof meta.description === 'string' ? meta.description : '';
+    if (!description) continue; // skill must have a description to be discoverable
+    skills.push({ name, description, dir: entry.name });
+  }
+  return skills;
+}
+
+// Render the Level-1 preview appended to the turn-1 system prompt.
+// Keeps each line short so ~20 skills still fits comfortably in a local model's context.
+function formatSkillsForPrompt(skills) {
+  if (!skills.length) return '';
+  const lines = skills.map(s => `- ${s.name}: ${s.description}`);
+  return [
+    '',
+    'Available skills (call load_skill with the name to open one before acting on its domain):',
+    ...lines,
+  ].join('\n');
 }
 
 // Convert title to kebab-case filename slug
@@ -272,8 +360,9 @@ function tryParseJSON(s) {
 const TOOL_DOCS = {
   help: 'Get tool documentation. args: {tool?}',
   list_files: 'List files in workspace. args: {path=".", pattern?}',
-  read_file: 'Read text file. args: {path, max_bytes?=4096}',
+  read_file: 'Read text file. args: {path, max_bytes?=4096, start_line?, end_line?, with_line_numbers?=false} — when start_line is set, returns a 100-line window with numbered lines (use before patch_file)',
   write_file: 'Write text file. args: {path, content}',
+  patch_file: 'Surgical line-range edit. args: {path, start_line, end_line, replacement} — replaces lines start_line..end_line inclusive; pass empty replacement to delete. Read with start_line first to verify line numbers.',
   fetch_url: 'HTTP(S) fetch. args: {url, method?, headers?, body?, as?=text|json, max_bytes?=4096}',
   define_tool: 'Define a new tool at runtime. args: {name, code}',
   search_web: 'DuckDuckGo HTML search. args: {query, max_results?}',
@@ -287,7 +376,13 @@ const TOOL_DOCS = {
   save_learning: 'Save an operational learning. args: {content, category?="discovery"}',
   read_section: 'Read a markdown file by heading. args: {path, heading?} — omit heading to list all headings',
   finish_task: 'Declare the task complete and return a final summary. args: {summary, files_created?}',
-  spawn_agent: 'Spawn a focused subagent with its own context. args: {task, instruction?, max_turns?=3} — use for subtasks that would fill context (research, analysis, code generation)'
+  spawn_agent: 'Spawn a focused subagent with its own context. args: {task, instruction?, max_turns?=3} — use for subtasks that would fill context (research, analysis, code generation)',
+  list_skills: 'List local SKILL.md bundles (name + description). args: {} — cheap Level-1 preview; use before load_skill',
+  load_skill: 'Open one skill: return the full SKILL.md body so you can follow it. args: {name} — relative links in the body resolve under ./skills/<name>/',
+  discover_skills: 'List skills published at a remote /.well-known/agent-skills/index.json. args: {url} — read-only; install via `npx skills add` or add-skill.sh',
+  extract_skill: 'Capture a methodology as a reusable SKILL.md draft. args: {name, description, when_to_use, steps[{title,actions,success_criteria,artifacts?,rules?}], goal?, inputs?, rules?} — writes ./skills/drafts/<name>/SKILL.md; promote with `mv skills/drafts/<name> skills/<name>`',
+  run_in_container: 'Run a shell command inside an isolated OCI container (Apple `container` CLI or Docker). args: {image, command, mounts?=[], workdir?, network?="none", timeout_ms?=30000} — default is no network + no host writes; load the apple-container skill for install/setup',
+  describe_mcp_tool: 'Return full JSONSchema + description for a connected MCP tool. args: {name} — only needed when the Level-1 signature in the system prompt is insufficient'
 };
 
 // Error recovery hints keyed by common error codes.
@@ -541,16 +636,46 @@ const ToolRegistry = {
   },
 
   async read_file(args, ctx) {
-    const { path: p, max_bytes } = args || {};
+    const { path: p, max_bytes, start_line, end_line, with_line_numbers } = args || {};
     assertString(p, 'path');
     const full = safePath(ctx.cwd, p);
-    let data = fs.readFileSync(full, 'utf8');
-    // Apply explicit max_bytes if provided (overrides default truncation)
+    const raw = fs.readFileSync(full, 'utf8');
+
+    // Line-windowed mode — when start_line is given, return exactly that range
+    // (defaults to a 100-line window, the SWE-agent Goldilocks number). Line numbers
+    // are 1-based and inclusive. Use this when the agent needs to target patch_file.
+    if (typeof start_line === 'number' && start_line >= 1) {
+      const lines = raw.split(/\r?\n/);
+      // Drop the phantom empty trailing element that split leaves behind for files that
+      // end in \n — so line counts match what patch_file expects.
+      if (/\r?\n$/.test(raw) && lines[lines.length - 1] === '') lines.pop();
+      const total = lines.length;
+      const start = Math.max(1, Math.floor(start_line));
+      const end = typeof end_line === 'number' && end_line >= start
+        ? Math.min(total, Math.floor(end_line))
+        : Math.min(total, start + 99);
+      const slice = lines.slice(start - 1, end);
+      const width = String(end).length;
+      const body = with_line_numbers !== false
+        ? slice.map((ln, i) => `${String(start + i).padStart(width)}: ${ln}`).join('\n')
+        : slice.join('\n');
+      const meta = `[lines ${start}-${end} of ${total}]`;
+      return truncate(`${meta}\n${body}`, (typeof max_bytes === 'number' && max_bytes > 0) ? max_bytes : CONFIG.maxToolOutputChars * 2);
+    }
+
+    // Byte-mode (default) — whole file or byte-capped. Optionally prefix line numbers.
     const limit = (typeof max_bytes === 'number' && max_bytes > 0)
       ? max_bytes
       : CONFIG.maxToolOutputChars;
+    let data = raw;
+    if (with_line_numbers) {
+      const lines = data.split(/\r?\n/);
+      if (/\r?\n$/.test(data) && lines[lines.length - 1] === '') lines.pop();
+      const width = String(lines.length).length;
+      data = lines.map((ln, i) => `${String(i + 1).padStart(width)}: ${ln}`).join('\n');
+    }
     if (data.length > limit) {
-      const hint = `Pass max_bytes to read more, or use read_section to navigate by heading`;
+      const hint = `Pass max_bytes to read more, or set start_line/end_line for a windowed view, or use read_section to navigate by heading`;
       data = data.slice(0, limit) + `\n...[truncated ${data.length - limit} chars. ${hint}]`;
     }
     return data;
@@ -565,10 +690,53 @@ const ToolRegistry = {
     return `Wrote ${Buffer.byteLength(content, 'utf8')} bytes to ${p}`;
   },
 
+  // patch_file replaces a line range (inclusive, 1-based) with `replacement`. Surgical edit
+  // primitive — the SWE-agent paper showed line-range edits beat whole-file rewrites for any
+  // code-editing agent because tokens scale with change size, not file size. Read the target
+  // region with `read_file` + `start_line` first to verify line numbers before calling this.
+  // No linter is wired in here (language-agnostic harness); compose with run_in_container or
+  // a skill-provided checker if you need one. Preserves the file's trailing-newline style.
+  async patch_file(args, ctx) {
+    const { path: p, start_line, end_line, replacement = '' } = args || {};
+    assertString(p, 'path');
+    if (typeof start_line !== 'number' || start_line < 1) {
+      throw new AppError('patch_file: start_line must be a 1-based integer', 'VALIDATION');
+    }
+    if (typeof end_line !== 'number' || end_line < start_line) {
+      throw new AppError('patch_file: end_line must be >= start_line', 'VALIDATION');
+    }
+    const full = safePath(ctx.cwd, p);
+    const raw = fs.readFileSync(full, 'utf8');
+    const hadTrailingNewline = /\r?\n$/.test(raw);
+    const lines = raw.split(/\r?\n/);
+    // Drop the phantom empty string split produces when the file ends in a newline, so our
+    // line indices match what `read_file start_line=` shows.
+    if (hadTrailingNewline && lines[lines.length - 1] === '') lines.pop();
+    const total = lines.length;
+    if (start_line > total) {
+      throw new AppError(`patch_file: start_line ${start_line} exceeds file length (${total})`, 'VALIDATION');
+    }
+    const clampedEnd = Math.min(end_line, total);
+    const replacementLines = String(replacement).split(/\r?\n/);
+    const removed = clampedEnd - start_line + 1;
+    const added = (replacement === '' && removed > 0) ? 0 : replacementLines.length;
+    const next = [
+      ...lines.slice(0, start_line - 1),
+      ...(replacement === '' && removed > 0 ? [] : replacementLines),
+      ...lines.slice(clampedEnd),
+    ];
+    const out = next.join('\n') + (hadTrailingNewline ? '\n' : '');
+    fs.writeFileSync(full, out, 'utf8');
+    const delta = added - removed;
+    const deltaStr = delta === 0 ? 'unchanged size' : (delta > 0 ? `+${delta} lines` : `${delta} lines`);
+    return `Patched ${p}: replaced lines ${start_line}-${clampedEnd} (${removed} removed, ${added} added, ${deltaStr}). New length: ${next.length} lines.`;
+  },
+
   // --- Minimal web tool ---
   async fetch_url(args, ctx) {
     const { url, method = 'GET', headers = {}, body, max_bytes, as = 'text' } = args || {};
     assertString(url, 'url');
+    checkUrlAllowed(url);
     const res = await fetch(url, {
       method,
       headers: { 'User-Agent': 'agent-builder/1.0', ...(headers || {}) },
@@ -621,6 +789,7 @@ const ToolRegistry = {
   async scrape_page(args, ctx) {
     const { url, max_bytes } = args || {};
     assertString(url, 'url');
+    checkUrlAllowed(url);
     const res = await fetch(url, { signal: ctx.signal, headers: { 'User-Agent': 'agent-builder/1.0' } });
     const html = await res.text();
     const limit = (typeof max_bytes === 'number' && max_bytes > 0)
@@ -644,6 +813,7 @@ const ToolRegistry = {
     assertString(url, 'url');
     assertString(p, 'path');
     const full = safePath(ctx.cwd, p);
+    checkUrlAllowed(url);
     const res = await fetch(url, { signal: ctx.signal, headers: { 'User-Agent': 'agent-builder/1.0' } });
     if (!res.ok) throw new AppError(`download_file failed: HTTP ${res.status}`, 'TOOL_ERROR');
     const contentLength = parseInt(res.headers.get('content-length') || '0', 10);
@@ -1029,6 +1199,287 @@ const ToolRegistry = {
     }
   },
 
+  // ---- Skills (Anthropic-style progressive disclosure) ----
+  // list_skills returns Level-1 metadata (name + description) for every local SKILL.md.
+  // Reads ctx._skills (seeded once in runAgent) to avoid rescanning disk per call.
+  async list_skills(args, ctx) {
+    const skills = ctx._skills || discoverLocalSkills(ctx.cwd);
+    if (!skills.length) {
+      return `[EMPTY] No skills found in ./${CONFIG.skillsDir}/. Install one with:\n  npx skills add <source>\nor copy a SKILL.md to ./${CONFIG.skillsDir}/<name>/SKILL.md`;
+    }
+    return skills.map(s => `- ${s.name}: ${s.description}`).join('\n');
+  },
+
+  // load_skill returns the full SKILL.md body. Subsequent reads of scripts/references/assets
+  // go through read_file with paths relative to the skill's directory.
+  async load_skill(args, ctx) {
+    const { name } = args || {};
+    assertString(name, 'name');
+    const skills = ctx._skills || discoverLocalSkills(ctx.cwd);
+    const match = skills.find(s => s.name === name) || skills.find(s => s.dir === name);
+    if (!match) {
+      const available = skills.map(s => s.name).join(', ') || '(none)';
+      throw new AppError(`Skill not found: ${name}. Available: ${available}`, 'VALIDATION');
+    }
+    const skillMdPath = safePath(ctx.cwd, path.join(CONFIG.skillsDir, match.dir, 'SKILL.md'));
+    const raw = fs.readFileSync(skillMdPath, 'utf8');
+    const { body } = parseFrontmatter(raw);
+    return truncate(
+      [
+        `[SKILL: ${match.name}]`,
+        `Location: ${CONFIG.skillsDir}/${match.dir}/`,
+        `Referenced files resolve under this directory — use read_file to open them.`,
+        '---',
+        body.trim(),
+      ].join('\n'),
+      CONFIG.maxToolOutputChars * 4,
+      `Body truncated — open ${CONFIG.skillsDir}/${match.dir}/SKILL.md with read_file for the rest.`
+    );
+  },
+
+  // discover_skills lists skills published at a remote /.well-known/agent-skills/index.json.
+  // Read-only: installation is a separate step (`npx skills add` or add-skill.sh) so the stub
+  // stays dependency-free.
+  async discover_skills(args, ctx) {
+    const { url } = args || {};
+    assertString(url, 'url');
+    const base = String(url).replace(/\/+$/, '').replace(/\/\.well-known\/(agent-skills|skills)(\/index\.json)?$/, '');
+    const indexUrl = `${base}${WELL_KNOWN_SKILLS_PATH}`;
+    checkUrlAllowed(indexUrl);
+    const res = await fetch(indexUrl, { signal: ctx.signal, headers: { 'User-Agent': 'agent-builder/1.0' } });
+    if (!res.ok) throw new AppError(`discover_skills: HTTP ${res.status} fetching ${indexUrl}`, 'TOOL_ERROR');
+    let data;
+    try { data = await res.json(); }
+    catch (e) { throw new AppError(`discover_skills: invalid JSON at ${indexUrl}: ${e.message}`, 'TOOL_ERROR'); }
+    if (!Array.isArray(data.skills) || !data.skills.length) {
+      throw new AppError(`discover_skills: no skills in index at ${indexUrl}`, 'TOOL_ERROR');
+    }
+    const list = data.skills
+      .map(s => `- ${s.name || '(unnamed)'} [${s.type || 'skill-md'}]: ${s.description || ''}`)
+      .join('\n');
+    return truncate([
+      `Skills at ${indexUrl}:`,
+      list,
+      '',
+      `Install one with:  npx skills add ${base} --skill <name>`,
+      `Or copy the SKILL.md into ./${CONFIG.skillsDir}/<name>/SKILL.md and call load_skill.`,
+    ].join('\n'));
+  },
+
+  // describe_mcp_tool returns the full JSONSchema for a remote MCP tool. Agents normally
+  // only need the Level-1 signature we inject into the system prompt (`args: {a, b?}`),
+  // but fall back to this for tools with complex nested schemas, enum constraints, or
+  // descriptions buried in schema `description` fields.
+  async describe_mcp_tool(args, ctx) {
+    const { name } = args || {};
+    assertString(name, 'name');
+    const clients = ctx._mcpClients || [];
+    for (const client of clients) {
+      const prefix = `${client.name}_`;
+      if (!name.startsWith(prefix)) continue;
+      const toolName = name.slice(prefix.length);
+      const tool = client.tools.find(t => t.name === toolName);
+      if (!tool) continue;
+      return truncate([
+        `[mcp:${client.name}] ${tool.name}`,
+        tool.description || '(no description)',
+        '',
+        'Input schema:',
+        JSON.stringify(tool.inputSchema || {}, null, 2),
+      ].join('\n'), CONFIG.maxToolOutputChars * 2);
+    }
+    const available = clients
+      .flatMap(c => c.tools.map(t => `${c.name}_${t.name}`))
+      .join(', ') || '(no MCP tools connected)';
+    throw new AppError(`describe_mcp_tool: ${name} not found. Available: ${available}`, 'VALIDATION');
+  },
+
+  // run_in_container executes a shell command inside an isolated OCI container.
+  //
+  // When to reach for this:
+  //   - A skill bundles untrusted scripts/ that need to execute
+  //   - The agent needs to run a shell command that should not touch the host FS or network
+  //   - A task requires a runtime (Python, Node, Go…) not installed locally
+  //
+  // Prefers Apple's `container` CLI on macOS Apple Silicon (zero deps; see the bundled
+  // apple-container skill). Falls back to `docker` if `container` is not installed. Refuses
+  // cleanly if neither is available.
+  //
+  // Defaults are deny-by-default: `--network none` (no egress), no writable host mounts.
+  // Mounts pass through safePath so they cannot escape --cwd. Agent opts in explicitly.
+  async run_in_container(args, ctx) {
+    const { image, command, mounts = [], workdir, timeout_ms = CONFIG.toolTimeoutMs, network = 'none' } = args || {};
+    assertString(image, 'image');
+    assertString(command, 'command');
+
+    // Detect runtime. Prefer Apple `container` (native, lightweight); fall back to docker.
+    let runtime = null;
+    for (const candidate of ['container', 'docker']) {
+      try {
+        execFileSync(candidate, ['--version'], { stdio: 'ignore', timeout: 2000 });
+        runtime = candidate;
+        break;
+      } catch { /* not installed; try next */ }
+    }
+    if (!runtime) {
+      throw new AppError(
+        "run_in_container: neither `container` (Apple Silicon) nor `docker` is installed. " +
+        "Load the apple-container skill with load_skill for install instructions, or install Docker.",
+        'TOOL_ERROR'
+      );
+    }
+
+    const cliArgs = ['run', '--rm'];
+    if (network === 'none') cliArgs.push('--network', 'none');
+    else if (network && network !== 'default') cliArgs.push('--network', String(network));
+    if (workdir) cliArgs.push('-w', String(workdir));
+    for (const m of mounts) {
+      if (typeof m !== 'string' || !m) continue;
+      // Mount spec: `host:container[:ro]` — resolve host through safePath so agents
+      // cannot bind-mount paths outside --cwd (e.g. /Users/... / /etc).
+      const [hostPart, ...rest] = m.split(':');
+      const safeHost = safePath(ctx.cwd, hostPart);
+      cliArgs.push('-v', `${safeHost}:${rest.join(':')}`);
+    }
+    cliArgs.push(image, 'sh', '-lc', command);
+
+    try {
+      const out = execFileSync(runtime, cliArgs, {
+        timeout: Math.max(1000, Math.min(timeout_ms, 10 * 60_000)),
+        encoding: 'utf8',
+        maxBuffer: 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return truncate(`[${runtime}] exit=0\n${out || '(empty stdout)'}`);
+    } catch (e) {
+      const stderr = (e.stderr && e.stderr.toString()) || e.message || '';
+      throw new AppError(`run_in_container (${runtime}) failed: ${stderr.slice(0, 400)}`, 'TOOL_ERROR');
+    }
+  },
+
+  // extract_skill captures a methodology the agent just demonstrated as a reusable SKILL.md
+  // draft. Writes under CONFIG.skillsDir/drafts/<name>/ — same root discoverLocalSkills scans,
+  // but the reserved `drafts` name is excluded from discovery so drafts stay invisible to the
+  // harness until the user promotes them. Visible in Finder/ls so non-technical users can
+  // browse and read drafts before promoting.
+  //
+  // The agent supplies structure explicitly (name, description, when_to_use, steps[]).
+  // The tool does not infer — self-extraction on small models is unreliable and a bad SKILL.md
+  // pollutes the registry. Each step must include success_criteria (per Skillify convention).
+  async extract_skill(args, ctx) {
+    const { name, description, when_to_use, steps, goal, inputs, rules } = args || {};
+    assertString(name, 'name');
+    assertString(description, 'description');
+    assertString(when_to_use, 'when_to_use');
+    if (!Array.isArray(steps) || !steps.length) {
+      throw new AppError('extract_skill: steps must be a non-empty array', 'VALIDATION');
+    }
+    // agentskills.io naming: 1-64 chars, lowercase alphanumeric + hyphens,
+    // no leading/trailing/consecutive hyphens.
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(name) || /--/.test(name)) {
+      throw new AppError(
+        'extract_skill: name must be 1-64 chars, lowercase alphanumeric and hyphens (no leading, trailing, or consecutive hyphens)',
+        'VALIDATION'
+      );
+    }
+
+    // Flatten multi-line scalars to keep the YAML frontmatter parseable by strict readers.
+    const flatten = s => String(s).replace(/\r?\n/g, ' ').trim();
+    const descLine = flatten(description);
+    const title = name.split('-').map(w => w ? w[0].toUpperCase() + w.slice(1) : '').join(' ');
+
+    const out = [
+      '---',
+      `name: ${name}`,
+      `description: ${descLine}`,
+      '---',
+      '',
+      `# ${title}`,
+      '',
+      descLine,
+      '',
+      '## When to Use',
+      '',
+      flatten(when_to_use),
+      '',
+    ];
+
+    if (typeof goal === 'string' && goal.trim()) {
+      out.push('## Goal', '', goal.trim(), '');
+    }
+
+    if (Array.isArray(inputs) && inputs.length) {
+      out.push('## Inputs', '');
+      for (const input of inputs) {
+        if (input && typeof input.name === 'string' && typeof input.description === 'string') {
+          out.push(`- \`$${input.name}\`: ${flatten(input.description)}`);
+        }
+      }
+      out.push('');
+    }
+
+    out.push('## Steps', '');
+    steps.forEach((step, i) => {
+      if (!step || typeof step !== 'object') {
+        throw new AppError(`extract_skill: step ${i + 1} must be an object`, 'VALIDATION');
+      }
+      const stepTitle = typeof step.title === 'string' && step.title.trim() ? step.title.trim() : `Step ${i + 1}`;
+      out.push(`### ${i + 1}. ${stepTitle}`, '');
+
+      if (typeof step.actions === 'string' && step.actions.trim()) {
+        out.push(step.actions.trim(), '');
+      } else if (Array.isArray(step.actions) && step.actions.length) {
+        for (const action of step.actions) {
+          if (typeof action === 'string') out.push(`- ${action}`);
+        }
+        out.push('');
+      }
+
+      const criteria = step.success_criteria;
+      if (typeof criteria === 'string' && criteria.trim()) {
+        out.push(`**Success criteria**: ${criteria.trim()}`, '');
+      } else if (Array.isArray(criteria) && criteria.length) {
+        out.push('**Success criteria**:');
+        for (const c of criteria) {
+          if (typeof c === 'string') out.push(`- ${c}`);
+        }
+        out.push('');
+      } else {
+        throw new AppError(`extract_skill: step ${i + 1} missing success_criteria`, 'VALIDATION');
+      }
+
+      if (typeof step.artifacts === 'string' && step.artifacts.trim()) {
+        out.push(`**Artifacts**: ${step.artifacts.trim()}`, '');
+      }
+      if (typeof step.rules === 'string' && step.rules.trim()) {
+        out.push(`**Rules**: ${step.rules.trim()}`, '');
+      }
+    });
+
+    if (Array.isArray(rules) && rules.length) {
+      out.push('## Rules', '');
+      for (const r of rules) {
+        if (typeof r === 'string') out.push(`- ${r}`);
+      }
+      out.push('');
+    }
+
+    const body = out.join('\n');
+    const draftDir = safePath(ctx.cwd, path.join(CONFIG.skillsDir, SKILL_DRAFTS_DIRNAME, name));
+    fs.mkdirSync(draftDir, { recursive: true });
+    const outPath = path.join(draftDir, 'SKILL.md');
+    fs.writeFileSync(outPath, body, 'utf8');
+
+    const relPath = path.relative(ctx.cwd, outPath);
+    return truncate([
+      `[SKILL DRAFT SAVED] ${relPath}`,
+      `(${body.length} chars, ${steps.length} step(s))`,
+      '',
+      `Drafts live under ${CONFIG.skillsDir}/${SKILL_DRAFTS_DIRNAME}/ — readable in Finder, excluded from turn-1 disclosure.`,
+      `To promote:  mv ${CONFIG.skillsDir}/${SKILL_DRAFTS_DIRNAME}/${name} ${CONFIG.skillsDir}/${name}`,
+    ].join('\n'));
+  },
+
   // Signal that the task is complete. The agent loop checks for <<AGENT_DONE>> to stop cleanly.
   // This is better than hoping the model stops on its own — local models often ramble past the
   // answer or get stuck in loops without an explicit finish mechanism.
@@ -1249,6 +1700,209 @@ class GeminiProvider {
   }
 }
 
+// ======== MCP (Model Context Protocol) CLIENT ========
+// Minimal stdio MCP client — speaks newline-delimited JSON-RPC 2.0 to a child process
+// server. Covers the subset agent-builder needs: initialize handshake + tools/list +
+// tools/call. Does NOT implement streamable-HTTP transport, resources/prompts, sampling,
+// or server-initiated notifications (logged and ignored).
+//
+// Why progressive disclosure applies here too: at turn 1 the agent sees just the tool
+// name + one-line description per MCP tool. Full JSONSchema stays on the server until
+// the agent calls describe_mcp_tool, and parameters only materialize when the agent
+// actually invokes the tool. Same shape as skills, different source.
+class MCPClient {
+  constructor({ name, command, args = [], env = {} }) {
+    this.name = name;
+    this.command = command;
+    this.args = args;
+    this.env = env;
+    this.proc = null;
+    this.nextId = 1;
+    this.pending = new Map(); // id -> { resolve, reject }
+    this.tools = [];
+    this.buffer = '';
+    this.closed = false;
+  }
+
+  async connect(timeoutMs = CONFIG.mcpConnectTimeoutMs) {
+    this.proc = spawn(this.command, this.args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, ...this.env },
+    });
+    this.proc.stdout.setEncoding('utf8');
+    this.proc.stderr.setEncoding('utf8');
+    this.proc.stdout.on('data', chunk => this._onData(chunk));
+    // Many MCP servers log human-readable messages to stderr; surface them at debug level.
+    this.proc.stderr.on('data', chunk => logger.debug(`[mcp:${this.name}] ${String(chunk).trim()}`));
+    this.proc.on('exit', code => {
+      this.closed = true;
+      this._rejectAll(new AppError(`mcp:${this.name} exited (code=${code})`, 'TOOL_ERROR'));
+    });
+    this.proc.on('error', err => {
+      this._rejectAll(new AppError(`mcp:${this.name} process error: ${err.message}`, 'TOOL_ERROR'));
+    });
+
+    // Protocol version 2025-06-18 is the current MCP stable. Most servers accept older
+    // versions too; if they don't, the server returns an error from `initialize`.
+    await this._request('initialize', {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'agent-builder', version: '1.0' },
+    }, timeoutMs);
+    this._notify('notifications/initialized');
+
+    const listResult = await this._request('tools/list', {}, timeoutMs);
+    this.tools = Array.isArray(listResult?.tools) ? listResult.tools : [];
+    return this.tools;
+  }
+
+  async callTool(name, args, timeoutMs = CONFIG.mcpCallTimeoutMs) {
+    const res = await this._request('tools/call', { name, arguments: args || {} }, timeoutMs);
+    const text = (res?.content || [])
+      .filter(c => c && c.type === 'text' && typeof c.text === 'string')
+      .map(c => c.text)
+      .join('\n');
+    if (res?.isError) {
+      throw new AppError(`mcp:${this.name}:${name} ${text || 'tool reported an error'}`, 'TOOL_ERROR');
+    }
+    return text || '(tool returned no text content)';
+  }
+
+  close() {
+    if (this.proc && !this.closed) {
+      this.closed = true;
+      try { this.proc.kill('SIGTERM'); } catch { /* already dead */ }
+    }
+  }
+
+  _onData(chunk) {
+    this.buffer += chunk;
+    let idx;
+    while ((idx = this.buffer.indexOf('\n')) >= 0) {
+      const line = this.buffer.slice(0, idx).trim();
+      this.buffer = this.buffer.slice(idx + 1);
+      if (!line) continue;
+      let msg;
+      try { msg = JSON.parse(line); }
+      catch { logger.debug(`[mcp:${this.name}] non-JSON stdout: ${line.slice(0, 200)}`); continue; }
+      // Response (has id AND result/error) → resolve the pending request.
+      if (msg.id !== undefined && this.pending.has(msg.id)) {
+        const { resolve, reject } = this.pending.get(msg.id);
+        this.pending.delete(msg.id);
+        if (msg.error) reject(new AppError(`mcp:${this.name} ${msg.error.code}: ${msg.error.message}`, 'TOOL_ERROR'));
+        else resolve(msg.result);
+      } else {
+        // Server-initiated notification — we don't act on these (no listChanged handling yet).
+        logger.debug(`[mcp:${this.name}] notification: ${msg.method || '(unknown)'}`);
+      }
+    }
+  }
+
+  _request(method, params, timeoutMs) {
+    if (this.closed) return Promise.reject(new AppError(`mcp:${this.name} closed`, 'TOOL_ERROR'));
+    const id = this.nextId++;
+    const line = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new AppError(`mcp:${this.name} ${method} timed out after ${timeoutMs}ms`, 'TOOL_ERROR'));
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: v => { clearTimeout(timer); resolve(v); },
+        reject: e => { clearTimeout(timer); reject(e); },
+      });
+      this.proc.stdin.write(line);
+    });
+  }
+
+  _notify(method, params) {
+    if (this.closed) return;
+    const payload = { jsonrpc: '2.0', method };
+    if (params) payload.params = params;
+    this.proc.stdin.write(JSON.stringify(payload) + '\n');
+  }
+
+  _rejectAll(err) {
+    for (const { reject } of this.pending.values()) reject(err);
+    this.pending.clear();
+  }
+}
+
+// Load MCP server config. CONFIG.mcpServers wins if set; otherwise fall back to ./mcp.json
+// in the cwd. Accepts {servers:{...}}, {mcpServers:{...}}, or a flat {...} at the root.
+function loadMcpConfig(cwd) {
+  if (CONFIG.mcpServers && Object.keys(CONFIG.mcpServers).length) return CONFIG.mcpServers;
+  const p = path.join(cwd, 'mcp.json');
+  try {
+    const raw = fs.readFileSync(p, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      if (parsed.servers && typeof parsed.servers === 'object') return parsed.servers;
+      if (parsed.mcpServers && typeof parsed.mcpServers === 'object') return parsed.mcpServers;
+      return parsed;
+    }
+  } catch { /* no config, no MCP — silent */ }
+  return {};
+}
+
+// Connect to every configured server in parallel, register proxies into ToolRegistry.
+// Returns { clients, summary } — clients stay alive for the run; summary is the block
+// appended to the system prompt at turn 1 and on every subsequent turn.
+async function connectMcpServers(cwd) {
+  const servers = loadMcpConfig(cwd);
+  const entries = Object.entries(servers);
+  if (!entries.length) return { clients: [], summary: '' };
+
+  const settled = await Promise.allSettled(entries.map(async ([name, cfg]) => {
+    if (!cfg || typeof cfg.command !== 'string') {
+      throw new AppError(`mcp:${name} config missing "command"`, 'CONFIG');
+    }
+    const client = new MCPClient({ name, command: cfg.command, args: cfg.args || [], env: cfg.env || {} });
+    await client.connect();
+    return client;
+  }));
+
+  const clients = [];
+  const lines = [];
+  settled.forEach((res, i) => {
+    const [name] = entries[i];
+    if (res.status === 'rejected') {
+      logger.warn(`[mcp:${name}] skipped: ${res.reason?.message || res.reason}`);
+      return;
+    }
+    const client = res.value;
+    clients.push(client);
+    logger.info(`[mcp:${name}] ${client.tools.length} tool(s)`);
+    for (const t of client.tools) {
+      const proxyName = `${name}_${t.name}`;
+      if (ToolRegistry[proxyName]) {
+        logger.warn(`[mcp:${name}] name collision: ${proxyName} already registered, skipping`);
+        continue;
+      }
+      // Proxy: call the remote tool, return its concatenated text content.
+      ToolRegistry[proxyName] = async (args) => {
+        const text = await client.callTool(t.name, args || {});
+        return truncate(text);
+      };
+      // Build a short doc line with parameter names from the schema — enough for the
+      // LLM to call it without fetching the full schema via describe_mcp_tool.
+      const required = Array.isArray(t.inputSchema?.required) ? t.inputSchema.required : [];
+      const props = Object.keys(t.inputSchema?.properties || {});
+      const paramPart = props.length
+        ? ` args: {${props.map(p => required.includes(p) ? p : `${p}?`).join(', ')}}`
+        : '';
+      const desc1 = (t.description || '').split(/\r?\n/)[0].trim();
+      TOOL_DOCS[proxyName] = `[mcp:${name}] ${desc1}${paramPart}`;
+      lines.push(`- ${proxyName}: ${desc1}`);
+    }
+  });
+
+  const summary = lines.length
+    ? `\n\nMCP tools (call by name; use describe_mcp_tool for full schema):\n${lines.join('\n')}`
+    : '';
+  return { clients, summary };
+}
+
 function splitPrefixedModel(spec) {
   const s = (spec || '').trim();
   const m = s.match(/^([a-z]+):(.+)$/i);
@@ -1434,8 +2088,27 @@ async function runAgent({ task, model, provider: providerHint, openaiKey, anthro
   });
   logger.info(`Provider: ${provider.constructor.name}, Model: ${provider.model || '(default)'}`);
 
+  // Level-1 skill disclosure: scan once and append to the system prompt so the agent knows
+  // what skills exist without having to call list_skills first. The bodies stay on disk.
+  const skills = discoverLocalSkills(cwd);
+  const skillsPreview = formatSkillsForPrompt(skills);
+  if (skills.length) {
+    logger.info(`Skills available: ${skills.map(s => s.name).join(', ')}`);
+  }
+
+  // Connect to any configured MCP servers. Each server's tools get registered into
+  // ToolRegistry as `<server>_<tool>` so the agent calls them with the same syntax as
+  // built-ins. `mcpSummary` is a compact block we append to both the turn-1 system
+  // prompt and the turn-2+ brief so the agent keeps seeing MCP tools as the turns run.
+  const { clients: mcpClients, summary: mcpSummary } = await connectMcpServers(cwd);
+  if (mcpClients.length) {
+    logger.info(`MCP servers connected: ${mcpClients.map(c => c.name).join(', ')}`);
+  }
+  const closeMcp = () => { for (const c of mcpClients) c.close(); };
+
+  try {
   const messages = [
-    { role: 'system', content: FULL_INSTRUCTION },
+    { role: 'system', content: `${FULL_INSTRUCTION}${skillsPreview}${mcpSummary}` },
     { role: 'user', content: task }
   ];
   let lastToolCallCount = 0;
@@ -1447,7 +2120,7 @@ async function runAgent({ task, model, provider: providerHint, openaiKey, anthro
     if (turn > 0) {
       messages[0] = {
         role: 'system',
-        content: `${AGENT_INSTRUCTION.trim()}\n\n${toolInstructionsBrief(turn, CONFIG.maxTurns)}`
+        content: `${AGENT_INSTRUCTION.trim()}\n\n${toolInstructionsBrief(turn, CONFIG.maxTurns)}${skillsPreview}${mcpSummary}`
       };
     }
 
@@ -1485,7 +2158,7 @@ async function runAgent({ task, model, provider: providerHint, openaiKey, anthro
         return content;
       }
 
-      const results = await executeTools(toolCalls, { cwd, _provider: provider, _spawnDepth: 0 });
+      const results = await executeTools(toolCalls, { cwd, _provider: provider, _spawnDepth: 0, _skills: skills, _mcpClients: mcpClients });
 
       // Check if finish_task was among the results
       const finishResult = results.find(r => r.name === 'finish_task' && r.status === 'ok');
@@ -1515,6 +2188,10 @@ async function runAgent({ task, model, provider: providerHint, openaiKey, anthro
   logger.error('  - Run with LOG_LEVEL=debug to see model responses');
   logger.error('  - Simplify the task or break it into smaller steps');
   throw new AppError('Max turns reached without completion');
+  } finally {
+    // Always tear down child MCP servers — success, failure, or hard throw.
+    closeMcp();
+  }
 }
 
 // ======== CLI INTERFACE ========
@@ -1522,7 +2199,8 @@ function parseArgs(argv) {
   const args = {
     task: '', model: '', provider: '', yolo: false, cwd: process.cwd(),
     openaiKey: '', anthropicKey: '', geminiKey: '', saveKeys: false,
-    maxTurns: 0
+    maxTurns: 0,
+    allowHosts: [],
   };
   const positional = [];
 
@@ -1537,6 +2215,7 @@ function parseArgs(argv) {
     else if (arg === '--anthropic-key') { args.anthropicKey = argv[++i]; }
     else if (arg === '--gemini-key') { args.geminiKey = argv[++i]; }
     else if (arg === '--save-keys') { args.saveKeys = true; }
+    else if (arg === '--allow-host') { args.allowHosts.push(argv[++i]); }
     else if (arg === '--help' || arg === '-h') { args.help = true; }
     else if (!arg.startsWith('-')) { positional.push(arg); }
     else { console.warn(`[WARN] Unknown flag ${arg} (ignored)`); }
@@ -1599,6 +2278,15 @@ TO CREATE YOUR AGENT:
     if (args.maxTurns) {
       CONFIG.maxTurns = Math.max(1, args.maxTurns);
       logger.debug(`Overriding maxTurns to ${CONFIG.maxTurns}`);
+    }
+
+    // Extend networkAllowlist from env var + --allow-host flags (deduped).
+    const envHosts = (process.env.AGENT_BUILDER_ALLOW_HOSTS || '')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    const extraHosts = [...envHosts, ...args.allowHosts];
+    if (extraHosts.length) {
+      CONFIG.networkAllowlist = [...new Set([...CONFIG.networkAllowlist, ...extraHosts])];
+      logger.debug(`Network allowlist: ${CONFIG.networkAllowlist.join(', ')}`);
     }
 
     const result = await runAgent(args);

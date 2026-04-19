@@ -11,6 +11,7 @@ node <name>.js "task" --model deepseek-r1 --yolo  # specific Ollama model
 node <name>.js "task" --model openai:gpt-5-mini --yolo  # cloud provider
 node <name>.js "task" --max-turns 10 --yolo       # override 5-turn default
 node <name>.js "task" --cwd ./workspace --yolo    # confine file ops to dir
+node <name>.js "task" --allow-host api.github.com --yolo  # extend network allowlist
 ```
 
 Provider prefixes: `ollama:`, `openai:`, `anthropic:`, `gemini:` (or use `--provider`).
@@ -34,6 +35,14 @@ API keys: `--openai-key sk-...` / `--anthropic-key` / `--gemini-key`, or env var
 - **Error recovery hints** — tool failures include actionable hints (e.g., ENOENT → "Use list_files to check what exists"). The model sees `[OK]`/`[FAIL]`/`[EMPTY]` prefixes in tool results.
 - **Context compression** — after 6+ messages, older conversation history is summarized to free context window for local models.
 - **`spawn_agent` decomposes big tasks** — local models choke when context fills up. Use `spawn_agent` to split work into focused subtasks, each with a fresh context and 2-3 turn budget. The parent orchestrates; children do the heavy lifting. Max nesting depth: 3.
+- **Skills are progressive-disclosure add-ons** — drop `SKILL.md` bundles into `./skills/<name>/` and the harness auto-lists them (name + description) in the system prompt at turn 1. The agent calls `load_skill` to open one, then `read_file` for any referenced scripts/references/assets. Bodies never load until the agent opts in, so skills cost ~100 tokens each at idle. Install with `npx skills add <source>` or `add-skill.sh`.
+- **Network allowlist** — HTTP tools (`fetch_url`, `scrape_page`, `download_file`, `discover_skills`) are gated by `CONFIG.networkAllowlist`. Default: `duckduckgo.com`, `html.duckduckgo.com` (so `search_web` works out of the box). Extend per-run with `--allow-host <host>` (repeatable) or the `AGENT_BUILDER_ALLOW_HOSTS` env var (comma-separated). Use `*.example.com` for subdomain wildcards. Empty array = allow all.
+- **Sandboxed execution** — `run_in_container` runs a shell command inside an OCI container via Apple's `container` CLI (preferred) or `docker` (fallback). Default `--network none` and no writable mounts. Use it for untrusted scripts from skills, runtimes not installed locally, or anything that shouldn't touch the host. Load the bundled `apple-container` skill with `load_skill` for install/setup.
+- **MCP (Model Context Protocol) servers** — drop a `./mcp.json` (or set `CONFIG.mcpServers`) and the harness spawns each server at startup, lists its tools, and registers them as `<server>_<tool>`. stdio transport only; pure Node, no new deps. See the MCP section below.
+- **`read_file` supports line-numbered windowed reads** — pass `start_line` (and optional `end_line`, defaults to a 100-line window) to get exactly the region the agent needs with `   47: ` numbered prefixes. Use this before `patch_file` so the line numbers the agent targets are the ones the tool sees.
+- **`patch_file` replaces line ranges atomically** — `{path, start_line, end_line, replacement}` is the surgical edit primitive. Preferred over `write_file` for anything larger than a trivial file because tokens scale with the change, not the file. No built-in linter — compose with `run_in_container` or a skill-provided checker if you need one.
+- **Long-running projects** — for work spanning multiple agent runs, use the four-file pattern (`feature_list.json`, `progress.md`, `init.sh`, git) documented in the Long-Running Projects section. It's a convention, not harness code, and it's what keeps multi-session work coherent.
+- **Scheduling / triggers** — `automation/invoke-agent.sh` is the universal entrypoint for any scheduler (launchd, cron, Apple Shortcuts). Templates under `automation/launchd/` cover timer, calendar, and folder-watch triggers. The `inbox/` → agent → `outbox/` pattern makes iMessage / Siri / NFC / share-sheet / webhook all look the same to the agent. See `automation/README.md` for recipes.
 
 ## Workflow
 
@@ -246,6 +255,432 @@ Output format:
 - Generated tests saved alongside source files
 `;
 ```
+
+## Safety & Sandboxing
+
+The harness gives agents two layers of protection for anything touching the outside world: a **network allowlist** for HTTP tools and a **container sandbox** for shell execution. Neither is bulletproof — they raise the cost of accidents and soft-constrain what an autonomous agent can do.
+
+### Network allowlist
+
+`CONFIG.networkAllowlist` controls which hosts the user-URL tools (`fetch_url`, `scrape_page`, `download_file`, `discover_skills`) may contact. `search_web` is pinned to DuckDuckGo and is not gated separately.
+
+**Defaults** (minimal — only what built-in search needs):
+
+```
+duckduckgo.com
+html.duckduckgo.com
+```
+
+**Extend per run** (no stub edit required):
+
+```bash
+# One-off: add a single host on the command line
+node agent.js "Read the GitHub API" --allow-host api.github.com --yolo
+
+# Multiple hosts
+node agent.js "Scrape Wikipedia" --allow-host en.wikipedia.org --allow-host commons.wikimedia.org --yolo
+
+# Via environment (comma-separated)
+AGENT_BUILDER_ALLOW_HOSTS=api.github.com,raw.githubusercontent.com node agent.js "..." --yolo
+
+# Wildcards: *.example.com matches all subdomains
+node agent.js "..." --allow-host "*.github.com" --yolo
+```
+
+**Extend per agent** (hardcode into the agent file after `cp agent.stub`):
+
+```javascript
+// Near the top of your agent.js, in CONFIG:
+networkAllowlist: [
+  'duckduckgo.com',
+  'html.duckduckgo.com',
+  'api.github.com',          // research agents pulling repo info
+  'raw.githubusercontent.com', // fetching SKILL.md from GitHub
+  '*.arxiv.org',             // science/ML research agents
+  'api.openweathermap.org',  // domain-specific APIs
+],
+```
+
+**Typical additions by agent type:**
+
+| Agent type | Hosts to add |
+|---|---|
+| **Research / news** | `en.wikipedia.org`, `arxiv.org`, `*.reuters.com`, chosen news sources |
+| **Code / docs** | `api.github.com`, `raw.githubusercontent.com`, `docs.python.org`, `developer.mozilla.org` |
+| **Knowledge / RAG** | Only your own source domains — avoid wildcards |
+| **Data / API** | The specific API host only (`api.openweathermap.org`, etc.) |
+
+**Disable entirely** (not recommended) by setting `networkAllowlist: []` — matches legacy behavior where any host is reachable.
+
+### Container sandbox (`run_in_container`)
+
+For shell execution, the harness uses Apple's native `container` CLI on macOS Apple Silicon (preferred — zero deps, lightweight VM per container) or `docker` (fallback). The tool refuses cleanly if neither is installed.
+
+**Defaults are deny-first:**
+
+- `--network none` — no egress from the container. Opt in with `network: "bridge"`.
+- No writable host mounts unless the agent explicitly passes them.
+- Host mount paths pass through `safePath`, so `mounts: ["../../etc/passwd:..."]` is rejected the same way `write_file` rejects it.
+- 30 s timeout (override with `timeout_ms` up to 10 min).
+
+**Setup** — the repo ships a minimal `apple-container` skill at `./skills/apple-container/SKILL.md`. Load it from an agent to get install and troubleshooting commands:
+
+```
+<<tool:load_skill {"name":"apple-container"}>>
+```
+
+**Invocation example:**
+
+```
+<<tool:run_in_container {
+  "image": "python:3.12-slim",
+  "command": "python /data/extract.py /data/input.pdf /data/out.json",
+  "mounts": ["./data:/data"],
+  "network": "none",
+  "timeout_ms": 60000
+}>>
+```
+
+**When to reach for `run_in_container`:**
+
+- A skill bundles scripts that shouldn't run with the agent's full host privileges
+- The task needs a runtime (Python, Node, Go, specific CLI) not installed locally
+- The agent is doing parsing / extraction / linting on untrusted input
+
+### Further reading: stronger isolation
+
+`run_in_container` + the allowlist cover most practical cases. If you need stricter guarantees — per-capability permission models, CPU/memory quotas enforced in-process, JS-level isolation without Docker — look at:
+
+- **[secure-exec](https://secureexec.dev)** (Rivet) — TypeScript library for running Node / JS code in V8 isolates with fs + network permission callbacks. npm dep; breaks the zero-dep philosophy, so fork the stub or wrap it in a separate tool rather than pulling it into the canonical harness.
+- **[just-bash](https://github.com/vercel-labs/just-bash)** (Vercel Labs) — in-memory bash environment in TS. Useful when you want to emulate bash inside the agent rather than shell out. Same dep tradeoff.
+- **OpenShell** — k3s-on-Docker security gateway; heavier, for production multi-tenant deployments, not single-agent use.
+
+The stub intentionally stops at `container` + allowlist. Swap one of the above in if the threat model demands it.
+
+## MCP (Model Context Protocol)
+
+MCP gives agents **live capabilities** — tools served by running server processes (filesystem, github, postgres, slack, puppeteer, sequential-thinking, etc.). This complements skills: skills teach methodology (static), MCP supplies capability (dynamic).
+
+The stub implements a minimal MCP **client** over stdio transport. No new dependencies: pure `child_process.spawn` + JSON-RPC 2.0.
+
+### Configuration
+
+Two options — pick whichever fits.
+
+**Option A — `./mcp.json` in the cwd** (auto-discovered):
+
+```json
+{
+  "servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "ghp_…" }
+    }
+  }
+}
+```
+
+**Option B — inline in the agent file** (edit `CONFIG.mcpServers`):
+
+```javascript
+const CONFIG = {
+  // ...
+  mcpServers: {
+    filesystem: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "."] },
+    github: { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], env: { GITHUB_TOKEN: process.env.GITHUB_TOKEN } }
+  },
+};
+```
+
+`CONFIG.mcpServers` wins if set; otherwise `./mcp.json` is loaded. Either `{servers:{...}}` or `{mcpServers:{...}}` wrappers work in the JSON file.
+
+### How it looks to the agent
+
+At startup the harness spawns each server, sends the handshake, pulls `tools/list`, and registers every remote tool as `<serverKey>_<toolName>` in the same `ToolRegistry` as built-ins. Both the turn-1 system prompt and every subsequent turn include a compact block:
+
+```
+MCP tools (call by name; use describe_mcp_tool for full schema):
+- filesystem_read_text_file: Read a text file
+- filesystem_list_directory: List entries in a directory
+- github_create_issue: Create an issue on a repository
+- ...
+```
+
+Each tool's TOOL_DOCS entry includes parameter names derived from the remote JSONSchema (`args: {path}`, `args: {owner, repo, title, body?}`) — enough for the LLM to call without a schema round-trip. For complex tools, the agent can `describe_mcp_tool({name: "github_create_issue"})` to get the full schema on demand.
+
+### When to reach for MCP vs `define_tool` vs a skill
+
+| Need | Pick |
+|---|---|
+| Repeatable methodology, prose-heavy | **skill** |
+| One-off JS/TS logic the agent creates at runtime | **`define_tool`** |
+| Access to an external service (filesystem, DB, GitHub, Slack, browser) | **MCP** |
+| Long-running connection, server-side state, many related tools | **MCP** |
+
+### Interaction with the network allowlist
+
+MCP tools make their **own** network calls from their own child processes — they don't go through `fetch_url`, so `CONFIG.networkAllowlist` does not gate them. If you want to restrict an MCP server's network access, run it via `run_in_container` or pick a server that respects allowlist env vars. The allowlist still gates the agent's direct `fetch_url`/`scrape_page`/`download_file`/`discover_skills` calls as before.
+
+### Lifecycle
+
+- Servers are spawned in parallel at `runAgent` startup (`Promise.allSettled` — one bad server doesn't block others)
+- Handshake timeout is 15 s; per-tool-call timeout is 60 s (tune via `CONFIG.mcpConnectTimeoutMs` / `mcpCallTimeoutMs`)
+- All children are killed via `SIGTERM` in a `finally` block when the agent exits (success, failure, or throw)
+- Server stderr is piped to the harness at `LOG_LEVEL=debug`
+- Server-initiated notifications (e.g., `listChanged`) are logged and ignored — cached tool list does not refresh mid-run
+
+### Scope — what is NOT implemented
+
+Kept out of the stub to keep it readable and dep-free. Fork if you need them:
+
+- **Streamable-HTTP transport** (remote MCP servers) — currently stdio only
+- **Resources / prompts** primitives — only `tools/*` is wired
+- **Authentication flows** (OAuth-style) — pass secrets via `env` in the server config
+- **Sampling** (server asking the client's LLM to generate) — out of scope for this harness
+- **Notifications re-subscription** — list is cached once at startup
+
+### Building MCP servers
+
+See `/Users/vps/desktop/dev/mcps/.claude/skills/mcp-builder/` (or the official [mcp-builder skill](https://github.com/modelcontextprotocol)) for the full server-authoring guide (Zod/Pydantic schemas, pagination conventions, tool annotations). Build one; drop it into `mcp.json`; the harness consumes it automatically.
+
+## Skills (Add-on Capabilities)
+
+### Overview
+
+A **skill** is an [Anthropic-style](https://agentskills.io) `SKILL.md` bundle — a folder with YAML frontmatter (`name`, `description`) plus instructions and optional scripts/references/assets. The harness treats skills as **add-ons the agent can pull on demand** when the task enters a domain the skill covers. The agent's persona stays in `AGENT_INSTRUCTION`; skills layer on top.
+
+The contract uses progressive disclosure:
+
+| Level | What loads | When |
+|---|---|---|
+| 1 | `name` + `description` of every local skill | Auto-injected into the turn-1 system prompt |
+| 2 | Full `SKILL.md` body | Agent calls `load_skill` |
+| 3 | Referenced files (`scripts/`, `references/`, `assets/`) | Agent calls `read_file` on demand |
+
+### Directory Layout
+
+```
+<cwd>/
+└── skills/
+    ├── pdf-extraction/
+    │   ├── SKILL.md           # required: YAML frontmatter + body
+    │   ├── scripts/           # optional: referenced by the body
+    │   └── references/        # optional: reference docs
+    └── code-review/
+        └── SKILL.md
+```
+
+Minimum `SKILL.md`:
+
+```markdown
+---
+name: pdf-extraction
+description: Extract text and form fields from PDFs. Use when the user provides a PDF path.
+---
+
+# PDF Extraction
+
+Your steps:
+1. Run `scripts/extract.py <input.pdf> <output.json>`
+2. Read the JSON and summarise fields in markdown
+```
+
+### Using Skills from an Agent
+
+Three tools:
+
+- **`list_skills`** — returns local name + description. Cheap; call it any time to refresh the menu.
+- **`load_skill {name}`** — returns the full `SKILL.md` body. Relative links resolve under `./skills/<name>/`, so use `read_file` with paths like `skills/pdf-extraction/references/FORMS.md`.
+- **`discover_skills {url}`** — read-only listing of a remote `/.well-known/agent-skills/index.json`. Installation is **not** done by the stub; use `npx skills add <url>` or `add-skill.sh` to pull a skill into `./skills/`.
+
+The harness auto-injects Level-1 metadata into the system prompt, so the agent sees skills without calling `list_skills` first. If a skill clearly matches the task, instruct the agent to `load_skill` before acting on that domain.
+
+### Installing Skills
+
+The stub stays dependency-free; skill installation is a separate step. Options:
+
+```bash
+# Vercel-labs CLI (project-scoped)
+npx skills add vercel-labs/agent-skills --skill frontend-design -a universal
+
+# Local helper (from github.com/builtbyV/agent-builder)
+bash add-skill.sh anthropics/skills/skills/docx
+
+# Manual — works with any SKILL.md
+mkdir -p skills/my-skill && cp /path/to/SKILL.md skills/my-skill/
+```
+
+Any skill file matching `./skills/<name>/SKILL.md` with a non-empty `description` becomes discoverable on the next run.
+
+### Authoring Skills (`extract_skill`)
+
+An agent can capture its own successful methodology as a draft SKILL.md by calling `extract_skill` near the end of a run. This closes the loop: the same agent that consumes skills via `load_skill` produces them via `extract_skill`.
+
+The tool requires structure — it does not infer. The agent must supply:
+
+| Field | Required | Notes |
+|---|---|---|
+| `name` | Yes | `kebab-case`, 1-64 chars, agentskills.io-compliant |
+| `description` | Yes | One-line — goes into frontmatter for Level-1 disclosure |
+| `when_to_use` | Yes | Trigger phrase paragraph. Starts with "Use when..." |
+| `steps[]` | Yes | Each step MUST include `success_criteria`. Optional: `title`, `actions` (string or array), `artifacts`, `rules` |
+| `goal` | No | Overall outcome statement |
+| `inputs[]` | No | `[{name, description}]` — arguments the skill takes |
+| `rules[]` | No | Hard constraints |
+
+Drafts are written to `./skills/drafts/<name>/SKILL.md`. The `drafts` folder is visible in Finder / `ls` so non-technical users can browse and read drafts, but `discoverLocalSkills` explicitly skips it so drafts do NOT pollute the turn-1 system prompt until promoted:
+
+```bash
+# Review (or open in any editor / file browser)
+cat skills/drafts/my-skill/SKILL.md
+
+# Promote
+mv skills/drafts/my-skill skills/my-skill
+```
+
+**When an agent should call `extract_skill`:**
+
+Encode in the system prompt only when the agent performs genuinely repeatable work. Not every run warrants a skill; bad drafts pollute the registry. A reasonable trigger:
+
+```
+After finish_task, if the task followed a methodology that would help on similar
+future requests (distinct steps, clear success criteria, reusable inputs), call
+extract_skill with the structured steps. Skip for one-off or ambiguous work.
+```
+
+### When to Use Skills vs AGENT_INSTRUCTION
+
+| Choice | Signal |
+|---|---|
+| Put it in `AGENT_INSTRUCTION` | The agent's core identity, always-on methodology, output contract. |
+| Put it in a skill | Domain-specific procedure the agent only needs for a subset of tasks, OR methodology reusable across multiple agents, OR something already packaged as a SKILL.md upstream. |
+
+Don't paste skill bodies into `AGENT_INSTRUCTION` — that breaks progressive disclosure and wastes context. Reference the skill by name in the system prompt and let the agent open it at runtime.
+
+## Long-Running Projects (Multi-Session Work)
+
+Any task too large for a single `--max-turns` budget spans multiple agent runs. The patterns below come from Anthropic's internal Claude Code work and OpenAI's Codex-driven codebase — both teams discovered the same failure modes when agents hit the context-window boundary, and the same remedies.
+
+The harness gives you the primitives (`read_file`/`patch_file` for line-accurate edits, `spawn_agent` for subagent delegation, `save_learning` for notes, skills for reusable methodology). The multi-session *pattern* layers on top of these — it's a convention for how files in the workspace carry state across sessions.
+
+### Why multi-session work fails
+
+Two patterns dominate:
+
+1. **"Try to one-shot a huge task"** — the agent starts implementing feature after feature, never completes or verifies any of them, runs out of context, and leaves the next session looking at half-finished work with no clear truth about what's done.
+2. **"Declare victory early"** — a later session sees that progress has been made, infers "looks done," and stops. The agent has no structured way to know what *done* means for the project.
+
+Both failures share a root cause: **no persistent, structured record of project state that survives the context boundary**.
+
+### The four files every long project should have
+
+Put these at the project root (or under `context/` if you're pairing with the knowledge system):
+
+| File | Purpose | Format |
+|---|---|---|
+| `feature_list.json` | Ground truth for "is it done?" — one entry per user-visible feature with a `passes: boolean` flag the agent flips only after end-to-end verification | **JSON** (not Markdown — see below) |
+| `progress.md` | Human-readable session log — what was worked on, what completed, what state was left | Markdown, append-only |
+| `init.sh` | Idempotent environment-setup script — agents run this at session start instead of re-deriving how to boot the project | Shell |
+| Git | Checkpointing + recovery — every session ends with a commit; a broken session reverts to last known-good | `git`, not invented |
+
+#### Why JSON for the feature list, not Markdown
+
+Empirically, models are **less likely to silently modify or "tidy up" JSON** than Markdown. JSON has rigid structure that resists casual rewriting; Markdown invites reformatting. You want the feature list treated as inviolable ground truth, so encode it in a format that behaviorally matches that intent.
+
+Example entry:
+
+```json
+{
+  "category": "functional",
+  "description": "New chat button creates a fresh conversation",
+  "steps": [
+    "Navigate to main interface",
+    "Click the 'New Chat' button",
+    "Verify a new conversation appears in the sidebar",
+    "Check the chat area shows the welcome state"
+  ],
+  "passes": false
+}
+```
+
+The `steps` field doubles as the end-to-end test the agent runs before flipping `passes: true`. The agent cannot verify a feature by reading code alone — that's how the "declare victory early" failure mode happens. It must follow the steps in a real environment (browser, CLI, API call).
+
+### The standard startup sequence
+
+Every coding session should begin with the same ritual. Encode this in the agent's `AGENT_INSTRUCTION` or use it as the opening of a `defaultTask`:
+
+```
+On session start, ALWAYS run in order:
+1. list_files at cwd — confirm workspace layout
+2. read_file progress.md — understand recent work
+3. read_file feature_list.json — read ground truth
+4. run bash init.sh or equivalent — get the project into a working state
+5. run the project's smoke test — verify the baseline is green
+6. Pick the highest-priority {"passes": false} feature and work on that one only
+```
+
+Only after the baseline is green does the agent start a new feature. If the smoke test fails, the agent fixes the existing breakage first — otherwise you pile new work on a broken foundation and the underlying problem becomes harder to isolate.
+
+### Clean-state requirement at session end
+
+Before the context fills up, the agent must leave the workspace in a state the next session can safely build on. Explicit checklist for the end of every session:
+
+1. Run the smoke test — confirm nothing you did broke the baseline
+2. If a feature was completed and verified, flip its `passes: true` in `feature_list.json`
+3. Append a 2-3 line session summary to `progress.md` (what you worked on, what completed, what state you left)
+4. `git add` + `git commit -m "<descriptive message>"` — this is the checkpoint
+5. If the session left work half-done and broken, `git reset --hard HEAD~1` to the last clean commit — better to leave a green baseline than a polluted working tree
+
+The git commit is more than a checkpoint; it's the recovery mechanism. When a later change breaks something, reverting to the previous known-good commit is how the agent untangles itself without burning context on archaeology.
+
+### Initializer / coder split via `spawn_agent`
+
+Anthropic's two-agent architecture maps cleanly onto agent-builder: the first session (the initializer) does nothing but scaffold `feature_list.json`, `progress.md`, and `init.sh`. All subsequent sessions use a different prompt that assumes those files exist. `spawn_agent` is the harness-level mechanism for that split — your top-level agent invokes a fresh-context subagent for each feature, each with a 2–3 turn budget.
+
+```
+[top-level agent]
+  ├── read progress.md, feature_list.json
+  ├── pick next {"passes": false} feature
+  ├── spawn_agent({ task: "Implement and verify feature X. Steps: [...]", max_turns: 5 })
+  │     └── [subagent, fresh context]
+  │           ├── read_file the relevant source files (use start_line for precision)
+  │           ├── patch_file the edits
+  │           ├── run the feature's steps
+  │           └── finish_task with outcome
+  ├── [main agent updates feature_list.json + progress.md + git commit]
+  └── loop
+```
+
+This shape — **orchestrator stays thin, children do the heavy lifting** — is the same pattern that made Codex scale to a million lines with three engineers. The orchestrator's context stays focused on "what's the next feature"; each subagent's context stays focused on "implement this one thing."
+
+### Testing reality, not code
+
+Agents that verify features by reading code or running unit tests alone systematically miss bugs that only appear end-to-end. The Claude Code team observed this so consistently they wired Puppeteer in. For agent-builder, the equivalents are:
+
+| Feature class | Verification tool |
+|---|---|
+| Files / scripts | `run_in_container` with the appropriate image — run the actual script, check exit code + output |
+| HTTP APIs | `fetch_url` against a local server (added to the allowlist) |
+| Web UIs | `@modelcontextprotocol/server-puppeteer` via MCP — drive the browser and observe |
+| CLIs | `define_tool` that shells out with `execFileSync`, or `run_in_container` |
+
+The principle: **the agent's work quality is bounded by the quality of its feedback loops**. If the agent can't observe what a user would observe, it optimizes for proxies (unit tests pass, server responds 200) that don't correlate with actual correctness.
+
+### What to put where
+
+| State | File | Why |
+|---|---|---|
+| "Is it done yet?" | `feature_list.json` | Explicit, unambiguous, survives context boundaries |
+| "What happened last time?" | `progress.md` | Narrative continuity; cheap to scan at session start |
+| "How do I start this project?" | `init.sh` | Removes per-session reinvention cost |
+| "Why does this pattern exist?" | Skill under `./skills/` | Reusable methodology, progressive disclosure |
+| "What did I learn doing this?" | `save_learning` → `context/learnings.md` | Operational wisdom, append-only |
+| "Checkpoints + recovery" | Git | Built for exactly this |
 
 ## Knowledge Agent Pattern
 

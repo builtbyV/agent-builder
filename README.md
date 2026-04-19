@@ -15,6 +15,9 @@ The harness creates:
 - **Reasoning agents** — step-by-step problem solving with subagent decomposition
 - **Self-extending agents** — create new tools on-the-fly at runtime
 - **Knowledge agents** — build a compounding wiki from raw sources that grows richer over time
+- **Skill-driven agents** — drop `SKILL.md` bundles into `./skills/` and the agent opens them on demand
+- **MCP-connected agents** — point a `mcp.json` at any MCP server (filesystem, GitHub, Postgres, Slack, …) and its tools appear to the agent automatically
+- **Sandboxed agents** — run untrusted scripts inside OCI containers via Apple's native `container` CLI or Docker
 
 **No frameworks. No npm dependencies. Just Node.js and AI.**
 
@@ -136,14 +139,18 @@ pwd                # Check which folder you're in
 - **Subagent spawning** — decompose big tasks into focused subtasks with fresh contexts via `spawn_agent`
 - **Parallel tool execution** — independent tool calls run concurrently
 - **Error recovery** — actionable hints on failures (not raw stack traces)
-- **Safe by default** — preview tool calls before execution (`--yolo` to auto-run)
+- **Safe by default** — preview tool calls before execution (`--yolo` to auto-run); network allowlist on HTTP tools; sandboxed shell via `run_in_container`
 
 **What you get:**
 - **Zero npm dependencies** — Just Node.js and Ollama
 - **Single file** — The entire agent in one `.js` file
-- **18 built-in tools** — Files, web, search, knowledge base, orchestration
+- **24 built-in tools** — Files, web, search, knowledge base, orchestration, skills, MCP, sandbox
 - **Dynamic tools** — Agent creates tools at runtime as needed
 - **Knowledge system** — Ingest sources, compile a wiki, search with `rg`/`grep`, learnings that compound
+- **Skills (progressive disclosure)** — drop `SKILL.md` bundles into `./skills/` and the harness auto-lists them in the system prompt; bodies load on demand via `load_skill`. Compatible with `npx skills add` and the Anthropic/Vercel skill ecosystem
+- **MCP client (stdio)** — point `./mcp.json` at any Model Context Protocol server and its tools appear as `<server>_<tool>` in the agent's registry. No new dependencies
+- **Container sandbox** — `run_in_container` wraps Apple's native `container` CLI (macOS Apple Silicon) or Docker, with deny-first networking and `safePath`-confined mounts
+- **Network allowlist** — HTTP tools gated to a configurable host list; defaults to DuckDuckGo only, extend with `--allow-host` or `AGENT_BUILDER_ALLOW_HOSTS`
 - **Multiple providers** — Ollama (local, free), OpenAI, Anthropic, Google
 
 ## Example Agents
@@ -170,6 +177,16 @@ into a wiki of concept articles, and answers questions from the wiki"
 and generates statistics"
 ```
 
+```
+"Build an agent that uses the `filesystem` and `github` MCP servers to keep a
+README changelog in sync with recent commits"
+```
+
+```
+"Make an agent that runs Python scripts from ./skills/ inside a container so
+nothing escapes the working directory"
+```
+
 ## Safety First
 
 By default, the agent shows you what it plans to do:
@@ -187,6 +204,65 @@ Run with --yolo to execute automatically
 
 Review first, then run with `--yolo` if you approve.
 
+## Extend with Skills
+
+Skills are `SKILL.md` bundles — prose instructions plus optional scripts — that teach an agent a methodology for a domain. The harness auto-lists skills in the system prompt at turn 1 (just name + description, ~100 tokens each) and the agent opens them on demand.
+
+```bash
+# Drop any SKILL.md bundle into ./skills/
+skills/
+└── my-skill/
+    └── SKILL.md
+
+# Or install from the ecosystem
+npx skills add vercel-labs/agent-skills --skill frontend-design -a universal
+bash add-skill.sh anthropics/skills/skills/docx   # helper in /Users/vps/desktop/dev/skills/
+```
+
+Agents can also **author** skills — after finishing a repeatable task, they can call `extract_skill` to write a draft SKILL.md under `./skills/drafts/<name>/`. Review and promote:
+
+```bash
+cat skills/drafts/my-skill/SKILL.md   # review
+mv skills/drafts/my-skill skills/my-skill   # promote
+```
+
+See the Skills section in `AGENTS.md` for the full contract.
+
+## Run on a Schedule or Trigger
+
+Agents are just CLI programs, so anything that can run a shell command can trigger an agent. The `automation/` folder ships the macOS-native glue (launchd templates, a universal `invoke-agent.sh` entrypoint with lock files + log rotation, and an inbox/outbox pattern) so you don't have to figure it out:
+
+```bash
+# Fire every 5 minutes (or daily, or on folder change — pick a template)
+cp automation/launchd/timer.plist.template ~/Library/LaunchAgents/ee.agent-builder.MY-AGENT.plist
+# Edit: paths, agent file, task, interval
+launchctl load ~/Library/LaunchAgents/ee.agent-builder.MY-AGENT.plist
+```
+
+**Talk to your agent via Siri, iMessage, or the share sheet** — build a Shortcut that writes to `automation/inbox/`, and launchd wakes the agent on file change. Works with NFC tags, Focus mode, specific-contact messages, or "Hey Siri, ask agent". See [`automation/README.md`](automation/README.md) for the Shortcuts recipe and six other recipes (schedules, webhooks, Slack/Discord via MCP).
+
+## Connect MCP Servers
+
+Agents can talk to any [Model Context Protocol](https://modelcontextprotocol.io) server over stdio — filesystem, GitHub, Postgres, Slack, puppeteer, and dozens more. Drop a `mcp.json` in your working directory:
+
+```json
+{
+  "servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "ghp_…" }
+    }
+  }
+}
+```
+
+On startup the harness spawns each server, pulls its tools, and exposes them as `<server>_<tool>` (e.g. `filesystem_read_text_file`, `github_create_issue`). Full JSONSchema is available on demand via `describe_mcp_tool`. See the MCP section in `AGENTS.md` for the full contract.
+
 ## Built-in Tools
 
 Every agent created from the stub includes:
@@ -200,13 +276,26 @@ write_file         mark_compiled           scrape_page
 delete_file        search_context          download_file
 read_section       save_learning
 
+Skills             MCP                     Sandbox
+──────────────     ──────────────────      ─────────────
+list_skills        describe_mcp_tool       run_in_container
+load_skill
+discover_skills
+extract_skill
+
 Orchestration      Meta Tools
 ──────────────     ──────────
 spawn_agent        define_tool
 finish_task        help
 ```
 
-The knowledge tools enable a **compounding wiki pattern**: ingest raw sources → compile into structured articles → maintain an index → every interaction enriches the knowledge base. See `AGENTS.md` for the full Knowledge Agent Pattern.
+The **knowledge tools** enable a compounding wiki pattern: ingest raw sources → compile into structured articles → maintain an index → every interaction enriches the knowledge base. See `AGENTS.md` for the full Knowledge Agent Pattern.
+
+The **skill tools** let an agent explore (`list_skills`), open (`load_skill`), discover remote bundles (`discover_skills`), and capture successful methodologies as drafts (`extract_skill`) — a full author-consume loop compatible with the [Anthropic / Vercel skill ecosystem](https://agentskills.io).
+
+The **MCP tool** (`describe_mcp_tool`) surfaces full JSONSchema for any tool from a connected MCP server. Remote tools themselves register as `<server>_<tool>` — auto-discovered from `./mcp.json`.
+
+The **sandbox tool** (`run_in_container`) runs shell commands inside an OCI container — prefers Apple's native `container` CLI, falls back to Docker. Default `--network none`, `safePath`-confined mounts.
 
 ## Claude Code with Ollama (Fully Offline)
 
@@ -282,6 +371,11 @@ node my-agent.js "Your task" --openai-key sk-...
 node my-agent.js "Your task" --anthropic-key sk-ant-...
 node my-agent.js "Your task" --gemini-key AIza...
 node my-agent.js "Your task" --save-keys                    # Persist to .env
+
+# Network allowlist (HTTP tools)
+node my-agent.js "Your task" --allow-host api.github.com --yolo
+node my-agent.js "Your task" --allow-host "*.wikipedia.org" --yolo   # wildcard subdomains
+AGENT_BUILDER_ALLOW_HOSTS=api.github.com,raw.githubusercontent.com node my-agent.js "..." --yolo
 ```
 </details>
 
@@ -310,13 +404,14 @@ Dynamic tools run in a sandbox with access to: `fetch`, `file.read/write/list`, 
 <summary><b>Environment Variables</b></summary>
 
 ```bash
-OLLAMA_HOST=http://localhost:11434  # Ollama server (default)
-OPENAI_API_KEY=sk-...              # OpenAI
-ANTHROPIC_API_KEY=sk-ant-...       # Anthropic
-GEMINI_API_KEY=AIza...             # Google
-OPENAI_BASE_URL=https://...        # Custom API endpoints
+OLLAMA_HOST=http://localhost:11434         # Ollama server (default)
+OPENAI_API_KEY=sk-...                      # OpenAI
+ANTHROPIC_API_KEY=sk-ant-...               # Anthropic
+GEMINI_API_KEY=AIza...                     # Google
+OPENAI_BASE_URL=https://...                # Custom API endpoints
 ANTHROPIC_BASE_URL=https://...
-LOG_LEVEL=debug                    # debug, info, warn, error
+AGENT_BUILDER_ALLOW_HOSTS=a.com,b.com      # Extend the network allowlist
+LOG_LEVEL=debug                            # debug, info, warn, error
 ```
 </details>
 
@@ -329,9 +424,12 @@ Output Truncation     Large outputs capped at 4KB (configurable)
 Tool Timeouts         30-second timeout per tool call
 Preview Mode          Without --yolo, shows planned actions only
 Dynamic Tool Sandbox  Runtime tools get limited environment
+Network Allowlist     HTTP tools restricted to a host list (duckduckgo by default)
+Container Sandbox     run_in_container isolates shell via Apple `container` or Docker
 Smart JSON Parser     Handles LLM mistakes (trailing commas, quotes)
 System Search         search_context uses rg/grep when available
 Auto-Split            Large ingested files split on heading boundaries
+MCP Lifecycle         Child servers killed cleanly via try/finally on agent exit
 ```
 </details>
 
@@ -390,6 +488,12 @@ A: "You Only Live Once" — perfectly captures running code without confirmation
 **"Tool execution failed"** — Run without `--yolo` first to see what it's trying to do.
 
 **Large files truncated** — Use `read_section` to navigate by heading, or pass `max_bytes` to `read_file`.
+
+**"Network access blocked: <host> not in allowlist"** — By design. Re-run with `--allow-host <host>` (repeatable, supports `*.example.com` wildcards) or set `AGENT_BUILDER_ALLOW_HOSTS`. Hardcode regulars into `CONFIG.networkAllowlist` in your agent file.
+
+**"run_in_container: neither `container` nor `docker` is installed"** — Install Apple's `container` CLI (`brew install --cask container`) on macOS Apple Silicon, or install Docker. See `skills/apple-container/SKILL.md` for the minimal setup.
+
+**MCP server not showing up** — Check `LOG_LEVEL=debug` output for `[mcp:<name>]` lines. Common causes: wrong `command` in `mcp.json`, missing env var the server needs, or `npx` cold-start exceeding `mcpConnectTimeoutMs` (default 15 s — bump it in `CONFIG`).
 
 ## Learn More
 
